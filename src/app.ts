@@ -7,6 +7,9 @@ import authRoutes from "./modules/auth/auth.routes";
 import devicesRoutes from "./modules/devices/devices.routes";
 import videosRoutes from "./modules/videos/videos.routes";
 import uploadsRoutes from "./modules/videos/uploads.routes";
+import roomsRoutes from "./modules/rooms/rooms.routes";
+import recordingSessionsRoutes from "./modules/recording-sessions/recording-sessions.routes";
+import appRoutes from "./modules/app/app.routes";
 import { env } from "./config/env";
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -54,6 +57,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(devicesRoutes, { prefix: API_PREFIX });
   await app.register(videosRoutes, { prefix: API_PREFIX });
   await app.register(uploadsRoutes, { prefix: API_PREFIX });
+  await app.register(roomsRoutes, { prefix: API_PREFIX });
+  await app.register(recordingSessionsRoutes, { prefix: API_PREFIX });
+  await app.register(appRoutes, { prefix: API_PREFIX });
 
   return app;
 }

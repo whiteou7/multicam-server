@@ -2,16 +2,25 @@
 
 *English: [API.md](API.md)*
 
-Bản này hiện thực mốc 15/8 trong `specs/v3_GiaoDien_TichHop_API_MultiCamRecorder.md`:
+Bản này hiện thực các mốc 15/8, 22/8 và 29/8 trong
+`specs/v3_GiaoDien_TichHop_API_MultiCamRecorder.md`:
 
 1. Đăng nhập với 4 tài khoản mặc định (1 Controller + 3 Remote).
 2. Upload video dạng chunk từ máy Remote lên MinIO, hỗ trợ tiếp tục upload dở
    dang và chống trùng, kèm đủ phần thư viện/tải xuống để máy Controller liệt
    kê và tải clip về — đủ để demo trọn luồng quay → upload → lấy về.
+3. Ghép phòng qua mã mời, đồng bộ định kỳ `sync_device`/`sync_room`, điều
+   khiển quay (bắt đầu/dừng đồng thời toàn bộ máy Remote trong phòng), và
+   điều khiển camera từng máy (flash/zoom) — đúng luồng Controller ↔ Remote
+   ở mục 2.8-2.9, thực hiện hoàn toàn qua polling (xem
+   [Những điểm đơn giản hóa](#những-điểm-đơn-giản-hóa-trong-mốc-này)).
+4. Các API quản lý thiết bị và khôi phục mật khẩu còn lại
+   (`set_device_config`, `delete_device`, `set_devtoken`,
+   `get_verify_code`/`forgot_password`/`change_password`).
 
-Điều khiển phòng/phiên quay, socket, thông báo và push token thiết bị **chưa**
-được cài đặt — các phần này thuộc mốc 22/8 và 29/8 theo lộ trình trong tài
-liệu đặc tả (mục "LỘ TRÌNH LÀM VIỆC").
+Các API hồ sơ người dùng (`/users/*`) và module thông báo (`/notifications/*`)
+**chủ động không cài đặt** trong đợt này theo yêu cầu — không phải phần còn
+thiếu của lộ trình trong đặc tả.
 
 ## Cách chạy
 
@@ -106,12 +115,81 @@ Body: `{ "refresh_token": "..." }` → trả về cùng cấu trúc `access_toke
 ### `POST /auth/logout` 🔒
 Thu hồi refresh token gắn với thiết bị đang gọi.
 
+### `POST /auth/verify-code` — `get_verify_code`
+Body: `{ "email"?, "phone"? }` (một trong hai).
+- Giới hạn 1 lần gọi mỗi 120 giây cho cùng một target (`1010 Action has been done previously`).
+- Sinh mã 6 số (hạn 5 phút) và ghi log ở server — **chưa tích hợp nhà cung cấp
+  email/SMS thật** trong mốc này nên việc gửi chỉ là giả lập.
+- Phản hồi: `{ expires_in, masked_target }` (ví dụ `a***@gmail.com` / `090*****02`).
+
+### `POST /auth/password/forgot` — `forgot_password`
+Body: `{ "email"?, "phone"?, "code_verify", "new_password" }`. Đối chiếu mã đã
+lấy từ `get_verify_code`, đổi mật khẩu, và để an toàn thì thu hồi refresh
+token của toàn bộ thiết bị đang đăng nhập vào tài khoản đó.
+
+### `PUT /auth/password` 🔒 — `change_password`
+Body: `{ "old_password", "new_password" }`. Thu hồi refresh token của mọi
+thiết bị *khác*; thiết bị đang gọi vẫn giữ nguyên phiên.
+
 ### `POST /devices` 🔒
 Đăng ký (hoặc cập nhật) thiết bị một cách tường minh, tương đương `register_device` trong đặc tả.
 Body: `{ "device_id", "device_type", "device_name", "model?", "os_version?", "capabilities?" }`.
 
 ### `GET /devices` 🔒
 Liệt kê các thiết bị đã đăng ký dưới tài khoản đang gọi (tương đương `get_device_list`, hiện chỉ giới hạn trong phạm vi chính tài khoản đó — chưa hỗ trợ tham số `user_id` dành cho admin như trong đặc tả).
+
+### `PUT /devices/{device_id}` 🔒 — `set_device_config`
+Body: `{ "remote_control_enabled"?, "camera_name"? }`. Từ chối tắt
+`remote_control_enabled` với mã `1012 Limited access` khi thiết bị đang là
+thành viên một phòng — phải rời phòng trước.
+
+### `DELETE /devices/{device_id}` 🔒 — `delete_device`
+Thu hồi phiên của một thiết bị (chỉ thiết bị của chính mình): xóa refresh
+token và đặt `session_revoked = 1`, thiết bị đó nhận được cờ này ở lần
+`sync_device`/`refresh` kế tiếp và phải tự đăng xuất.
+
+### `PUT /devices/{device_id}/push-token` 🔒 — `set_devtoken`
+Body: `{ "devtype" (1=android, 2=ios), "devtoken" }`. Thiết bị Web
+(`device_type = 4`) nhận lỗi `1012 Limited access` — đúng ví dụ của mã này
+trong đặc tả.
+
+### `POST /devices/{device_id}/sync` 🔒 — `sync_device`
+API đồng bộ định kỳ (3-5 giây) theo mục 1.5/2.3 của đặc tả — đẩy trạng thái
+phần cứng/quay lên và nhận về các lệnh đang chờ. Đây cũng là đường duy nhất
+để nhận lệnh `start_record`/`stop_record`/`camera_config`/`leave_room` —
+mốc này chưa có socket đẩy lệnh (xem
+[Những điểm đơn giản hóa](#những-điểm-đơn-giản-hóa-trong-mốc-này)).
+
+Body (mọi trường đều tùy chọn — chỉ trường nào có mới được áp dụng):
+```json
+{
+  "battery_level": 80,
+  "is_charging": 0,
+  "storage_free": 1073741824,
+  "temperature_state": "normal",
+  "recording_state": "recording",
+  "elapsed_ms": 5000,
+  "upload_state": "none",
+  "upload_percent": 0,
+  "error_code": null,
+  "last_command_id": "<uuid lệnh cuối thiết bị đã thực hiện>"
+}
+```
+Phản hồi:
+```json
+{
+  "server_time": "...",
+  "next_sync_in": 3,
+  "room_status": { "in_room": 1, "room_id": "...", "session_id": "..." },
+  "pending_commands": [
+    { "command_id": "...", "type": "start_record", "payload": { ... }, "issued_at": "..." }
+  ],
+  "session_revoked": 0
+}
+```
+`next_sync_in` là `3` khi phòng của thiết bị đang quay, ngược lại là `5`. Gửi
+`last_command_id` sẽ đánh dấu đã nhận lệnh đó (và mọi lệnh cũ hơn, phòng khi
+phản hồi ack trước đó bị rớt mạng) để không bị gửi lại nữa.
 
 ---
 
@@ -189,6 +267,129 @@ Trả về link tải có chữ ký của MinIO (`DOWNLOAD_URL_TTL_SECONDS`, m�
 
 ---
 
+### Điều khiển phòng & phiên quay (đặc tả mục 2.8-2.9)
+
+Controller tạo phòng và chia sẻ mã mời 6 ký tự; máy Remote nhập mã và cấp
+quyền điều khiển; Controller bắt đầu/dừng quay và chỉnh camera cho toàn
+phòng. Toàn bộ dựa trên polling `sync_device`/`sync_room` — xem
+[Những điểm đơn giản hóa](#những-điểm-đơn-giản-hóa-trong-mốc-này) để biết vì
+sao mốc này chưa có socket đẩy lệnh hay luồng xem trực tiếp. Mọi API bên
+dưới, trừ `POST /rooms` và `POST /rooms/join`, đều yêu cầu người gọi là chủ
+phòng (Controller) — kiểm tra theo quyền sở hữu chứ không chỉ theo vai trò,
+nên cũng tự động chặn luôn phòng của Controller khác.
+
+#### `POST /rooms` 🔒 — `create_room` — **Chỉ dành cho Controller**
+Body: `{ "room_name"?, "max_members"? }` (mặc định 8). Yêu cầu thiết bị đang
+gọi phải có `remote_control_enabled = 1` (`1012` nếu chưa bật). Nếu Controller
+đã có phòng đang mở thì trả về phòng đó thay vì tạo phòng mới.
+```json
+{ "room_id": "...", "invite_code": "SKY8G4", "expires_at": "...", "owner_device_id": "...", "created_at": "..." }
+```
+
+#### `POST /rooms/join` 🔒 — `join_room`
+Body: `{ "invite_code", "device_id", "camera_name", "grant_control": true }`
+(`device_id` phải trùng thiết bị đang xác thực; `grant_control` phải bằng
+`true` — Remote luôn có thể thu hồi lại sau qua `set_member_permission`).
+`1010` nếu thiết bị đã ở phòng khác, `1008` nếu phòng đã đầy, `9992` nếu mã
+sai hoặc hết hạn.
+
+#### `GET /rooms/{room_id}/members` 🔒 — `get_room_members`
+Danh sách đầy đủ thành viên — gọi một lần khi mở màn lưới; các lần cập nhật
+sau dùng `sync_room`.
+
+#### `GET /rooms/{room_id}/sync` 🔒 — `sync_room`
+Query: `since?` (giá trị `revision` của lần gọi trước). API đồng bộ định kỳ
+(3-5 giây) của Controller — một lời gọi thay thế các socket event
+`device_status`/`state_changed`/`device_error`/`upload_progress` của thiết
+kế cũ.
+```json
+{
+  "server_time": "...", "revision": 5, "next_sync_in": 3,
+  "room": { "status": "open", "session_id": "...", "started_at": "..." },
+  "members": [ { "member_id": "...", "camera_name": "...", "is_online": 1, "has_granted_control": 1, "battery_level": 79, "recording_state": "recording", "elapsed_ms": 5000, "upload_state": "none", "...": "..." } ],
+  "joined": [ /* thành viên có joined_revision > since */ ],
+  "left": [ /* member_id của thành viên có left_revision > since */ ]
+}
+```
+
+#### `POST /rooms/{room_id}/invite-code` 🔒 — `refresh_invite_code`
+Sinh mã mới (hạn 10 phút) và vô hiệu hóa mã cũ.
+
+#### `DELETE /rooms/{room_id}/members/{member_id}` 🔒 — `kick_member`
+Loại một thành viên; xếp lệnh `leave_room` để thiết bị đó thoát chế độ phòng
+ở lần `sync_device` kế tiếp.
+
+#### `DELETE /rooms/{room_id}` 🔒 — `close_room`
+Nếu đang có phiên quay, xếp lệnh `stop_record` (rồi `leave_room`) cho mọi
+thành viên trước khi đóng phòng. Phản hồi: `{ closed_at, session_stopped }`.
+
+#### `POST /rooms/{room_id}/leave` 🔒 — `leave_room`
+Remote tự gọi cho chính mình (phải là thiết bị của thành viên đó).
+
+#### `PUT /rooms/{room_id}/members/{member_id}/permission` 🔒 — `set_member_permission`
+Body: `{ "grant_control": 0 | 1 }`. Chỉ thiết bị Remote sở hữu thành viên đó
+mới gọi được — Controller không thể tự ép cấp quyền cho mình.
+
+#### `POST /rooms/{room_id}/preview-token` 🔒 — `get_preview_token`
+Body: `{ "quality": "low"|"medium", "protocol": "hls"|"webrtc" }`. Trả về
+`{ preview_token, expires_in, streams: [{ member_id, stream_url }] }` —
+**`stream_url` luôn là `null`**: mã nguồn này chưa có media server
+WebRTC/HLS, chỉ có luồng upload theo chunk sau khi quay xong. Cấu trúc dữ
+liệu là thật để giao diện lưới có thể gắn sẵn `member_id` → ô hiển thị.
+
+#### `POST /rooms/{room_id}/recording/start` 🔒 — `start_recording`
+Body: `{ "target": "all" | ["member_id", ...], "config"?: { "resolution"?, "fps"?, "max_duration"? }, "client_command_id" }`.
+Xếp lệnh `start_record` (giao qua `sync_device`) cho mọi thành viên đang
+online và đã cấp quyền. `1010` nếu phòng đang quay rồi; `1011` nếu không có
+máy nào đủ điều kiện.
+```json
+{ "session_id": "...", "started_at": "...", "command_id": "cmd-1", "targets": ["member-1"], "rejected": [{ "member_id": "member-2", "reason": "offline" }] }
+```
+
+#### `POST /rooms/{room_id}/recording/stop` 🔒 — `stop_recording`
+Body: `{ "target": "all" | ["member_id", ...], "client_command_id" }`. Video
+**không** tự động upload — vẫn nằm trong thư mục clip của máy Remote cho tới
+khi người dùng chủ động gửi. Kết quả trả về chỉ phản ánh lệnh vừa xếp hàng
+(`status: "stop_queued"`, chưa có duration/size) — trạng thái hoàn tất thật
+sự của từng máy chỉ có sau khi lần `sync_device` kế tiếp của máy đó báo
+`recording_state: saved`; theo dõi qua `sync_room`/`get_recording_session`.
+
+#### `PUT /rooms/{room_id}/members/{member_id}/camera` 🔒 — `set_camera_config`
+Body: `{ "flash_mode": "off"|"on"|"auto"|"torch", "zoom_factor": 0.5-10.0, "client_command_id" }`.
+Xếp lệnh `camera_config`; bản ghi thành viên được cập nhật ngay theo hướng
+lạc quan (việc chờ `sync_room` xác nhận là do phía client tự quyết định theo
+gợi ý của đặc tả).
+
+#### `GET /rooms/{room_id}/members/{member_id}/camera` 🔒 — `get_camera_config`
+Trả về `{ flash_mode, zoom_factor, zoom_range: { min, max }, has_flash }`.
+`zoom_range`/`has_flash` lấy từ `capabilities` đã đăng ký của thiết bị nếu
+có, không thì mặc định `{0.5, 10.0}` / `true`.
+
+---
+
+### Phiên quay
+
+#### `GET /recording-sessions/{session_id}` 🔒 — `get_recording_session`
+Xem được bởi chủ phòng hoặc bất kỳ tài khoản nào đang/đã từng là thành viên
+phòng đó. Ghép từng thành viên với `videos` theo `(device_id, session_id)` —
+đây là cách khối metadata của `init_upload` phía Remote (mang theo
+`session_id` từ payload lệnh `start_record`) nối lại được với phiên quay:
+```json
+{
+  "session_id": "...", "room_id": "...", "started_at": "...", "stopped_at": "...", "status": "stopped",
+  "members": [ { "member_id": "...", "camera_name": "...", "state": "recording", "duration": 5000, "video_id": "...", "uploaded": 1 } ]
+}
+```
+
+---
+
+### `GET /app/version` — `check_new_version`
+Query: `platform`, `current_version` (được nhận nhưng chưa dùng đến). Hiện
+trả về giá trị tĩnh vì backend chưa theo dõi phiên bản client theo từng nền
+tảng: `{ latest_version, is_force_update: 0, release_note, store_url }`.
+
+---
+
 ## Bảng mã lỗi
 
 Cài đặt đúng theo mục 1.6 của đặc tả (`src/utils/codes.ts`):
@@ -219,7 +420,27 @@ Cài đặt đúng theo mục 1.6 của đặc tả (`src/utils/codes.ts`):
 
 ## Những điểm đơn giản hóa trong mốc này
 
-- Chưa có API phòng/phiên quay, socket hay thông báo (dự kiến từ mốc 22/8 trở đi).
+- **Chưa có socket đẩy lệnh.** Đặc tả cho phép điều này — mọi lệnh
+  (`start_record`/`stop_record`/`camera_config`/`leave_room`/`logout`) được
+  giao hoàn toàn qua `pending_commands` khi polling `sync_device`, và ứng
+  dụng vẫn chạy đủ chức năng nếu không có socket, đúng như ghi chú ở mục 1.5
+  của đặc tả.
+- **Chưa có luồng xem trực tiếp thật.** `get_preview_token` trả đúng cấu
+  trúc dữ liệu nhưng `stream_url` luôn là `null` — mã nguồn này chưa có
+  media server WebRTC/HLS, chỉ có luồng upload theo chunk sau khi quay xong.
+- **Chưa tích hợp nhà cung cấp email/SMS thật.** `get_verify_code` sinh và
+  lưu mã, rồi ghi log ở server; việc gửi thật nằm ngoài phạm vi mốc này.
+- **Chưa cài đặt `create_share_link`/`revoke_share_link`.** Hai API này được
+  nhắc tên trong danh sách kiểm tra vai trò ở mục 1.3 và bảng mã lỗi ở mục
+  1.6 của đặc tả, nhưng không có dòng đặc tả endpoint/method/tham số nào cho
+  chúng để hiện thực theo.
+- **Chưa cài đặt hồ sơ người dùng (`/users/*`) và thông báo
+  (`/notifications/*`)** — chủ động bỏ qua trong đợt này theo yêu cầu, không
+  phải phần thiếu của đặc tả.
+- `results` trả về từ `stop_recording` chỉ phản ánh lệnh vừa xếp hàng
+  (`status: "stop_queued"`) — trạng thái cuối cùng của từng máy (duration,
+  `video_id`) chỉ biết được sau khi lần `sync_device` kế tiếp của máy đó báo
+  `recording_state: saved`; theo dõi qua `sync_room`/`get_recording_session`.
 - Chưa sinh thumbnail khi upload (`thumbnail_url` luôn là `null`).
 - `get_list_videos` của Controller chưa lọc theo phòng; hiện thấy tất cả clip.
 - `capabilities` trong `register_device` được lưu nguyên trạng nhưng chưa được kiểm tra hay sử dụng.
@@ -234,9 +455,12 @@ src/
   db/                       Client better-sqlite3, schema.sql, seed.ts, repositories/
   middleware/authenticate.ts Xác thực JWT + kiểm tra vai trò
   modules/
-    auth/                  Đăng nhập, làm mới token, đăng xuất
-    devices/                Đăng ký + liệt kê thiết bị
+    auth/                  Đăng nhập, làm mới token, đăng xuất, khôi phục mật khẩu
+    devices/                Đăng ký/liệt kê/cấu hình/push-token thiết bị + sync_device
     videos/                 CRUD thư viện + luồng upload theo chunk
+    rooms/                  Mã mời, sync_room, điều khiển quay + camera
+    recording-sessions/     get_recording_session
+    app/                    check_new_version
   plugins/                  Plugin fastify cho jwt, minio
   utils/                    Khuôn phản hồi, mã lỗi, kiểm tra dữ liệu đầu vào, băm mật khẩu
 ```

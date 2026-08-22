@@ -2,16 +2,25 @@
 
 *Tiếng Việt: [API.vi.md](API.vi.md)*
 
-Implements the 15/8 milestone from `specs/v3_GiaoDien_TichHop_API_MultiCamRecorder.md`:
+Implements the 15/8, 22/8 and 29/8 milestones from
+`specs/v3_GiaoDien_TichHop_API_MultiCamRecorder.md`:
 
 1. Login with 4 default accounts (1 Controller + 3 Remote).
 2. Chunked video upload from a Remote device into MinIO, with resumability and
    dedup, plus enough of the video/download surface for a Controller to list
    and pull clips back — enough to demo the full record → upload → retrieve loop.
+3. Room/invite-code pairing, periodic `sync_device`/`sync_room` polling,
+   recording control (start/stop across every Remote in a room), and
+   per-member camera control (flash/zoom) — the Controller ↔ Remote loop from
+   § 2.8-2.9, delivered entirely over polling (see
+   [Known simplifications](#known-simplifications-for-this-milestone)).
+4. Remaining device-management and password-recovery endpoints
+   (`set_device_config`, `delete_device`, `set_devtoken`,
+   `get_verify_code`/`forgot_password`/`change_password`).
 
-Room/session control, sockets, notifications, and device push tokens are **not**
-implemented yet — those land with the 22/8 and 29/8 milestones per the roadmap
-in the spec (§ "LỘ TRÌNH LÀM VIỆC").
+User-profile endpoints (`/users/*`) and the notifications module
+(`/notifications/*`) are intentionally **not** implemented — out of scope by
+request, not part of the spec's own roadmap gap.
 
 ## Running it
 
@@ -106,12 +115,81 @@ Body: `{ "refresh_token": "..." }` → same shape as login's `access_token` / `r
 ### `POST /auth/logout` 🔒
 Revokes the refresh token bound to the calling device.
 
+### `POST /auth/verify-code` — `get_verify_code`
+Body: `{ "email"?, "phone"? }` (one of the two).
+- Throttled to one call per target every 120s (`1010 Action has been done previously`).
+- Generates a 6-digit code (5 min TTL) and logs it server-side — **no email/SMS
+  provider is wired up in this milestone**, so delivery is simulated.
+- Response: `{ expires_in, masked_target }` (e.g. `a***@gmail.com` / `090*****02`).
+
+### `POST /auth/password/forgot` — `forgot_password`
+Body: `{ "email"?, "phone"?, "code_verify", "new_password" }`. Verifies the
+code from `get_verify_code`, updates the password, and — as a safety
+measure — revokes every device's refresh token for that account.
+
+### `PUT /auth/password` 🔒 — `change_password`
+Body: `{ "old_password", "new_password" }`. Revokes every *other* device's
+refresh token; the calling device keeps its session.
+
 ### `POST /devices` 🔒
 Explicit device (re-)registration, mirrors spec's `register_device`.
 Body: `{ "device_id", "device_type", "device_name", "model?", "os_version?", "capabilities?" }`.
 
 ### `GET /devices` 🔒
 Lists devices registered under the caller's account (spec's `get_device_list`, scoped to self for now — the admin/`user_id` override from the spec isn't implemented).
+
+### `PUT /devices/{device_id}` 🔒 — `set_device_config`
+Body: `{ "remote_control_enabled"?, "camera_name"? }`. Rejects turning
+`remote_control_enabled` off with `1012 Limited access` while the device is
+an active room member — leave the room first.
+
+### `DELETE /devices/{device_id}` 🔒 — `delete_device`
+Revokes a device's session (own devices only): clears its refresh token and
+sets `session_revoked = 1`, which that device picks up on its next
+`sync_device`/`refresh` call and must treat as a forced logout.
+
+### `PUT /devices/{device_id}/push-token` 🔒 — `set_devtoken`
+Body: `{ "devtype" (1=android, 2=ios), "devtoken" }`. Web devices
+(`device_type = 4`) get `1012 Limited access` — matches the spec's example
+for that code.
+
+### `POST /devices/{device_id}/sync` 🔒 — `sync_device`
+The periodic (3-5s) heartbeat from spec § 1.5/2.3 — pushes hardware/recording
+telemetry and pulls any commands queued for this device. This is also how
+`start_record`/`stop_record`/`camera_config`/`leave_room` commands are
+delivered; there is no push socket in this milestone (see
+[Known simplifications](#known-simplifications-for-this-milestone)).
+
+Body (all optional — only fields present are applied):
+```json
+{
+  "battery_level": 80,
+  "is_charging": 0,
+  "storage_free": 1073741824,
+  "temperature_state": "normal",
+  "recording_state": "recording",
+  "elapsed_ms": 5000,
+  "upload_state": "none",
+  "upload_percent": 0,
+  "error_code": null,
+  "last_command_id": "<uuid of the last command this device executed>"
+}
+```
+Response:
+```json
+{
+  "server_time": "...",
+  "next_sync_in": 3,
+  "room_status": { "in_room": 1, "room_id": "...", "session_id": "..." },
+  "pending_commands": [
+    { "command_id": "...", "type": "start_record", "payload": { ... }, "issued_at": "..." }
+  ],
+  "session_revoked": 0
+}
+```
+`next_sync_in` is `3` while the device's room is recording, `5` otherwise.
+Reporting `last_command_id` acks that command (and anything older, in case a
+previous ack response was dropped) so it stops being re-delivered.
 
 ---
 
@@ -189,6 +267,131 @@ Returns a presigned MinIO GET URL (`DOWNLOAD_URL_TTL_SECONDS`, default 10 min), 
 
 ---
 
+### Room & recording control (spec § 2.8-2.9)
+
+A Controller creates a room and shares its 6-character invite code; Remotes
+join and grant control; the Controller starts/stops recording and adjusts
+camera settings across the whole room. All of it is driven by
+`sync_device`/`sync_room` polling — see
+[Known simplifications](#known-simplifications-for-this-milestone) for why
+there's no push socket or live-preview stream in this milestone. Every route
+below except `POST /rooms` and `POST /rooms/join` requires the caller to be
+the room's owner (Controller) — enforced by ownership, not just role, so it
+also implicitly rejects other Controllers' rooms.
+
+#### `POST /rooms` 🔒 — `create_room` — **Controller only**
+Body: `{ "room_name"?, "max_members"? }` (default 8). Requires the caller's
+device to have `remote_control_enabled = 1` (`1012` if not). If the
+Controller already has an open room, returns that room instead of creating a
+new one.
+```json
+{ "room_id": "...", "invite_code": "SKY8G4", "expires_at": "...", "owner_device_id": "...", "created_at": "..." }
+```
+
+#### `POST /rooms/join` 🔒 — `join_room`
+Body: `{ "invite_code", "device_id", "camera_name", "grant_control": true }`
+(`device_id` must match the authenticated device; `grant_control` must be
+`true` — a Remote can always revoke it afterwards via
+`set_member_permission`). `1010` if the device is already in a room, `1008`
+if the room is full, `9992` if the code is wrong/expired.
+
+#### `GET /rooms/{room_id}/members` 🔒 — `get_room_members`
+Full member list — call once when the grid screen opens; use `sync_room` for
+updates afterwards.
+
+#### `GET /rooms/{room_id}/sync` 🔒 — `sync_room`
+Query: `since?` (the `revision` from the previous call). The Controller's
+periodic (3-5s) poll — one call replaces the `device_status`/`state_changed`/
+`device_error`/`upload_progress` socket events from the previous design.
+```json
+{
+  "server_time": "...", "revision": 5, "next_sync_in": 3,
+  "room": { "status": "open", "session_id": "...", "started_at": "..." },
+  "members": [ { "member_id": "...", "camera_name": "...", "is_online": 1, "has_granted_control": 1, "battery_level": 79, "recording_state": "recording", "elapsed_ms": 5000, "upload_state": "none", "...": "..." } ],
+  "joined": [ /* members with joined_revision > since */ ],
+  "left": [ /* member_id of members with left_revision > since */ ]
+}
+```
+
+#### `POST /rooms/{room_id}/invite-code` 🔒 — `refresh_invite_code`
+Regenerates the code (10 min TTL) and invalidates the old one.
+
+#### `DELETE /rooms/{room_id}/members/{member_id}` 🔒 — `kick_member`
+Removes a member; queues a `leave_room` command so the device exits room mode
+on its next `sync_device`.
+
+#### `DELETE /rooms/{room_id}` 🔒 — `close_room`
+If a recording session is active, queues `stop_record` (then `leave_room`)
+for every member before closing. Response: `{ closed_at, session_stopped }`.
+
+#### `POST /rooms/{room_id}/leave` 🔒 — `leave_room`
+Remote calls this on itself (must be the member's own device).
+
+#### `PUT /rooms/{room_id}/members/{member_id}/permission` 🔒 — `set_member_permission`
+Body: `{ "grant_control": 0 | 1 }`. Only the Remote device that owns the
+membership may call this — a Controller can never force-grant itself control.
+
+#### `POST /rooms/{room_id}/preview-token` 🔒 — `get_preview_token`
+Body: `{ "quality": "low"|"medium", "protocol": "hls"|"webrtc" }`. Returns
+`{ preview_token, expires_in, streams: [{ member_id, stream_url }] }` —
+**`stream_url` is always `null`**: there's no WebRTC/HLS media server in this
+codebase, only post-hoc chunked upload to MinIO. The contract shape is real
+so a grid UI can already bind `member_id` → tile.
+
+#### `POST /rooms/{room_id}/recording/start` 🔒 — `start_recording`
+Body: `{ "target": "all" | ["member_id", ...], "config"?: { "resolution"?, "fps"?, "max_duration"? }, "client_command_id" }`.
+Queues a `start_record` command (delivered via `sync_device`) to every
+targeted member that's online and has granted control. `1010` if the room is
+already recording; `1011` if no target is eligible.
+```json
+{ "session_id": "...", "started_at": "...", "command_id": "cmd-1", "targets": ["member-1"], "rejected": [{ "member_id": "member-2", "reason": "offline" }] }
+```
+
+#### `POST /rooms/{room_id}/recording/stop` 🔒 — `stop_recording`
+Body: `{ "target": "all" | ["member_id", ...], "client_command_id" }`. Video
+is **not** auto-uploaded — it stays in the Remote's local clip folder until
+the user sends it. Results reflect the queued command only
+(`status: "stop_queued"`, no duration/size yet) — each member's actual
+completion shows up asynchronously via `sync_room`/`get_recording_session`
+once that Remote's next `sync_device` reports `recording_state: saved`.
+
+#### `PUT /rooms/{room_id}/members/{member_id}/camera` 🔒 — `set_camera_config`
+Body: `{ "flash_mode": "off"|"on"|"auto"|"torch", "zoom_factor": 0.5-10.0, "client_command_id" }`.
+Queues a `camera_config` command; the member row is updated optimistically
+(the spec's suggestion to wait for `sync_room` confirmation is a client-side
+concern).
+
+#### `GET /rooms/{room_id}/members/{member_id}/camera` 🔒 — `get_camera_config`
+Returns `{ flash_mode, zoom_factor, zoom_range: { min, max }, has_flash }`.
+`zoom_range`/`has_flash` come from the device's registered `capabilities`
+when present, else default to `{0.5, 10.0}` / `true`.
+
+---
+
+### Recording sessions
+
+#### `GET /recording-sessions/{session_id}` 🔒 — `get_recording_session`
+Viewable by the room's owner or by any account that has (or had) a
+membership in that room. Joins each member against `videos` by
+`(device_id, session_id)` — which is how a Remote's `init_upload` metadata
+(carrying the `session_id` from the `start_record` command payload) ties
+back to the session:
+```json
+{
+  "session_id": "...", "room_id": "...", "started_at": "...", "stopped_at": "...", "status": "stopped",
+  "members": [ { "member_id": "...", "camera_name": "...", "state": "recording", "duration": 5000, "video_id": "...", "uploaded": 1 } ]
+}
+```
+
+---
+
+### `GET /app/version` — `check_new_version`
+Query: `platform`, `current_version` (both accepted, currently unused).
+Static response for now — this backend doesn't track per-platform client
+releases: `{ latest_version, is_force_update: 0, release_note, store_url }`.
+
+---
+
 ## Error codes
 
 Implemented per spec § 1.6 (`src/utils/codes.ts`):
@@ -219,7 +422,24 @@ Implemented per spec § 1.6 (`src/utils/codes.ts`):
 
 ## Known simplifications for this milestone
 
-- No room/session, socket, or notification APIs yet (scheduled for 22/8+).
+- **No push socket.** The spec explicitly allows this — commands
+  (`start_record`/`stop_record`/`camera_config`/`leave_room`/`logout`) are
+  delivered entirely through `pending_commands` in `sync_device` polling, and
+  the app is fully functional without a socket per the spec's own note in § 1.5.
+- **No live preview streaming.** `get_preview_token` returns the contracted
+  shape but every `stream_url` is `null` — there's no WebRTC/HLS media server
+  in this codebase, only post-hoc chunked upload to MinIO.
+- **No real email/SMS provider.** `get_verify_code` generates and stores a
+  code and logs it server-side; delivery is out of scope.
+- **`create_share_link`/`revoke_share_link` are not implemented.** They're
+  named in spec § 1.3's role-check list and § 1.6's error table, but no
+  endpoint/method/params row exists anywhere in the spec to implement against.
+- **User-profile (`/users/*`) and notifications (`/notifications/*`) are not
+  implemented** — out of scope by request for this pass, not a spec gap.
+- `stop_recording`'s `results` reflect the queued command only
+  (`status: "stop_queued"`) — final per-member state (duration, `video_id`)
+  is only knowable once that Remote's next `sync_device` reports
+  `recording_state: saved`; poll `sync_room`/`get_recording_session` for it.
 - No thumbnail generation on upload (`thumbnail_url` is always `null`).
 - Controller's `get_list_videos` isn't room-scoped yet; it sees all clips.
 - `register_device`'s `capabilities` are stored as-is but not validated or used.
@@ -234,9 +454,12 @@ src/
   db/                       better-sqlite3 client, schema.sql, seed.ts, repositories/
   middleware/authenticate.ts JWT auth + role guard
   modules/
-    auth/                  login, refresh, logout
-    devices/                register + list devices
+    auth/                  login, refresh, logout, password recovery
+    devices/                register/list/config/push-token + sync_device
     videos/                 library CRUD + chunked upload flow
+    rooms/                  invite codes, sync_room, recording + camera control
+    recording-sessions/     get_recording_session
+    app/                    check_new_version
   plugins/                  jwt, minio fastify plugins
   utils/                    response envelope, error codes, validation, password hashing
 ```

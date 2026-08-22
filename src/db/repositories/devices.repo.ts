@@ -13,6 +13,9 @@ export interface DeviceRow {
   refresh_token: string | null;
   is_online: number;
   last_seen: string | null;
+  push_token: string | null;
+  push_devtype: number | null;
+  session_revoked: number;
   created_at: string;
   updated_at: string;
 }
@@ -44,6 +47,7 @@ export const devicesRepo = {
          os_version = COALESCE(excluded.os_version, devices.os_version),
          capabilities_json = COALESCE(excluded.capabilities_json, devices.capabilities_json),
          is_online = 1,
+         session_revoked = 0,
          last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
     ).run({
@@ -65,5 +69,41 @@ export const devicesRepo = {
     return db
       .prepare<[string]>("SELECT * FROM devices WHERE user_id = ? ORDER BY created_at DESC")
       .all(userId) as DeviceRow[];
+  },
+
+  setConfig(id: string, fields: { remote_control_enabled?: number; camera_name?: string }): void {
+    const current = this.findById(id);
+    if (!current) return;
+    db.prepare(
+      `UPDATE devices SET remote_control_enabled = @remote_control_enabled, camera_name = @camera_name,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = @id`
+    ).run({
+      id,
+      remote_control_enabled: fields.remote_control_enabled ?? current.remote_control_enabled,
+      camera_name: fields.camera_name ?? current.camera_name,
+    });
+  },
+
+  setPushToken(id: string, devtype: number, devtoken: string): void {
+    db.prepare("UPDATE devices SET push_devtype = ?, push_token = ? WHERE id = ?").run(
+      devtype,
+      devtoken,
+      id
+    );
+  },
+
+  setSessionRevoked(id: string, revoked: 0 | 1): void {
+    db.prepare("UPDATE devices SET session_revoked = ? WHERE id = ?").run(revoked, id);
+  },
+
+  revokeSession(id: string): void {
+    db.prepare("UPDATE devices SET refresh_token = NULL, session_revoked = 1 WHERE id = ?").run(id);
+  },
+
+  // Used by change_password/forgot_password to sign every other session out.
+  revokeAllForUser(userId: string, exceptDeviceId?: string): void {
+    db.prepare(
+      "UPDATE devices SET refresh_token = NULL, session_revoked = 1 WHERE user_id = ? AND id != ?"
+    ).run(userId, exceptDeviceId ?? "");
   },
 };

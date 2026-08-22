@@ -104,6 +104,14 @@ export const videosRepo = {
     db.prepare("UPDATE videos SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").run(id);
   },
 
+  findByDeviceAndSession(deviceId: string, sessionId: string): VideoRow | undefined {
+    return db
+      .prepare<[string, string]>(
+        "SELECT * FROM videos WHERE device_id = ? AND session_id = ? AND deleted_at IS NULL LIMIT 1"
+      )
+      .get(deviceId, sessionId) as VideoRow | undefined;
+  },
+
   updateNameDescription(id: string, name?: string, description?: string): void {
     const current = this.findById(id);
     if (!current) return;

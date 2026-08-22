@@ -52,6 +52,10 @@ export const usersRepo = {
     });
   },
 
+  updatePassword(id: string, passwordHash: string): void {
+    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, id);
+  },
+
   incrementStorageUsed(id: string, deltaBytes: number): void {
     db.prepare("UPDATE users SET storage_used = storage_used + ? WHERE id = ?").run(
       deltaBytes,
