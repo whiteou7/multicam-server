@@ -1,13 +1,16 @@
 import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
 import Fastify, { FastifyInstance } from "fastify";
 import { ApiError, CODE, MESSAGE } from "./utils/codes";
 import jwtPlugin from "./plugins/jwt";
 import minioPlugin from "./plugins/minio";
+import mediasoupPlugin from "./plugins/mediasoup";
 import authRoutes from "./modules/auth/auth.routes";
 import devicesRoutes from "./modules/devices/devices.routes";
 import videosRoutes from "./modules/videos/videos.routes";
 import uploadsRoutes from "./modules/videos/uploads.routes";
 import roomsRoutes from "./modules/rooms/rooms.routes";
+import mediaWsRoutes from "./modules/media/media.ws.routes";
 import recordingSessionsRoutes from "./modules/recording-sessions/recording-sessions.routes";
 import appRoutes from "./modules/app/app.routes";
 import { env } from "./config/env";
@@ -22,6 +25,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, { origin: true });
   await app.register(jwtPlugin);
   await app.register(minioPlugin);
+  await app.register(websocket);
+  await app.register(mediasoupPlugin);
 
   // Chunk upload endpoints send raw binary with Content-Type: application/octet-stream.
   app.addContentTypeParser(
@@ -58,6 +63,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(videosRoutes, { prefix: API_PREFIX });
   await app.register(uploadsRoutes, { prefix: API_PREFIX });
   await app.register(roomsRoutes, { prefix: API_PREFIX });
+  await app.register(mediaWsRoutes, { prefix: API_PREFIX });
   await app.register(recordingSessionsRoutes, { prefix: API_PREFIX });
   await app.register(appRoutes, { prefix: API_PREFIX });
 

@@ -12,8 +12,11 @@ Bản này hiện thực các mốc 15/8, 22/8 và 29/8 trong
 3. Ghép phòng qua mã mời, đồng bộ định kỳ `sync_device`/`sync_room`, điều
    khiển quay (bắt đầu/dừng đồng thời toàn bộ máy Remote trong phòng), và
    điều khiển camera từng máy (flash/zoom) — đúng luồng Controller ↔ Remote
-   ở mục 2.8-2.9, thực hiện hoàn toàn qua polling (xem
-   [Những điểm đơn giản hóa](#những-điểm-đơn-giản-hóa-trong-mốc-này)).
+   ở mục 2.8-2.9, thực hiện qua polling (xem
+   [Những điểm đơn giản hóa](#những-điểm-đơn-giản-hóa-trong-mốc-này)). Phần
+   xem trực tiếp là ngoại lệ duy nhất không dùng polling: một SFU mediasoup
+   cùng kênh WebSocket báo hiệu giờ truyền hình ảnh camera thật từ mỗi máy
+   Remote sang Controller (xem `get_preview_token` bên dưới).
 4. Các API quản lý thiết bị và khôi phục mật khẩu còn lại
    (`set_device_config`, `delete_device`, `set_devtoken`,
    `get_verify_code`/`forgot_password`/`change_password`).
@@ -271,12 +274,15 @@ Trả về link tải có chữ ký của MinIO (`DOWNLOAD_URL_TTL_SECONDS`, m�
 
 Controller tạo phòng và chia sẻ mã mời 6 ký tự; máy Remote nhập mã và cấp
 quyền điều khiển; Controller bắt đầu/dừng quay và chỉnh camera cho toàn
-phòng. Toàn bộ dựa trên polling `sync_device`/`sync_room` — xem
+phòng. Việc điều khiển phòng/quay/camera dựa trên polling
+`sync_device`/`sync_room` — xem
 [Những điểm đơn giản hóa](#những-điểm-đơn-giản-hóa-trong-mốc-này) để biết vì
-sao mốc này chưa có socket đẩy lệnh hay luồng xem trực tiếp. Mọi API bên
-dưới, trừ `POST /rooms` và `POST /rooms/join`, đều yêu cầu người gọi là chủ
-phòng (Controller) — kiểm tra theo quyền sở hữu chứ không chỉ theo vai trò,
-nên cũng tự động chặn luôn phòng của Controller khác.
+sao phần đó chưa có socket đẩy lệnh. Xem trực tiếp là ngoại lệ: nó chạy qua
+một WebSocket mediasoup riêng (`GET /rooms/{room_id}/media`, mô tả trong
+phần `get_preview_token` bên dưới). Mọi API bên dưới, trừ `POST /rooms` và
+`POST /rooms/join`, đều yêu cầu người gọi là chủ phòng (Controller) — kiểm
+tra theo quyền sở hữu chứ không chỉ theo vai trò, nên cũng tự động chặn luôn
+phòng của Controller khác.
 
 #### `POST /rooms` 🔒 — `create_room` — **Chỉ dành cho Controller**
 Body: `{ "room_name"?, "max_members"? }` (mặc định 8). Yêu cầu thiết bị đang
@@ -331,11 +337,58 @@ Body: `{ "grant_control": 0 | 1 }`. Chỉ thiết bị Remote sở hữu thành 
 mới gọi được — Controller không thể tự ép cấp quyền cho mình.
 
 #### `POST /rooms/{room_id}/preview-token` 🔒 — `get_preview_token`
-Body: `{ "quality": "low"|"medium", "protocol": "hls"|"webrtc" }`. Trả về
-`{ preview_token, expires_in, streams: [{ member_id, stream_url }] }` —
-**`stream_url` luôn là `null`**: mã nguồn này chưa có media server
-WebRTC/HLS, chỉ có luồng upload theo chunk sau khi quay xong. Cấu trúc dữ
-liệu là thật để giao diện lưới có thể gắn sẵn `member_id` → ô hiển thị.
+Body: `{ "quality": "low"|"medium", "protocol": "hls"|"webrtc" }` — nhận vào
+để khớp đặc tả nhưng chưa dùng đến (mọi phòng đều dùng chung một Router
+mediasoup bất kể `quality`/`protocol`). Lần gọi đầu tiên sẽ tạo Router
+mediasoup cho phòng và trả về thông tin cần thiết để mở kênh WebSocket báo
+hiệu bên dưới:
+```json
+{
+  "preview_token": "...",
+  "expires_in": 300,
+  "signaling_url": "/it4788/api/v1/rooms/{room_id}/media",
+  "rtp_capabilities": { "codecs": [ /* mediasoup RtpCodecCapability[] */ ], "headerExtensions": [ "..." ] },
+  "streams": [ { "member_id": "...", "is_online": 1 } ]
+}
+```
+`streams` chỉ là danh sách thành viên hiện tại cho tiện tham khảo — **không**
+liệt kê producer nào đang phát. Một máy Remote có thể vào phòng hoặc bắt đầu
+phát sau khi token này được cấp, nên producer chỉ được báo qua socket theo
+thời gian thực (`new-producer`, xem bên dưới).
+
+#### `GET /rooms/{room_id}/media` 🔌 — WebSocket báo hiệu mediasoup
+Yêu cầu nâng cấp (upgrade), xác thực giống mọi API khác (header
+`Authorization: Bearer <access_token>` trên request nâng cấp). Vai trò được
+suy ra chứ client không tự khai:
+- người gọi là thiết bị chủ phòng → **controller**, chỉ được mở transport
+  `recv` và gọi `consume`.
+- người gọi là thiết bị của một thành viên Remote đang hoạt động →
+  **remote**, `participant_id` chính là `member_id` đó, chỉ được mở
+  transport `send` và gọi `produce`.
+Trường hợp khác sẽ nhận message `error` rồi bị đóng socket.
+
+Mọi message đều là JSON. Gửi kèm `request_id` để khớp phản hồi với yêu cầu;
+các sự kiện server tự đẩy (`new-producer`, `producer-closed`) không có
+`request_id`.
+
+| → client gửi server | ← server phản hồi/đẩy sự kiện |
+|---|---|
+| *(ngay khi kết nối)* | `welcome { participant_id, role, rtp_capabilities }` |
+| `create-transport { direction: "send"\|"recv" }` | `transport-created { transport_id, ice_parameters, ice_candidates, dtls_parameters }` |
+| `connect-transport { transport_id, dtls_parameters }` | `transport-connected { transport_id }` |
+| `produce { transport_id, kind, rtp_parameters }` (chỉ remote) | `produced { producer_id }`, sau đó mọi thành viên khác nhận `new-producer { member_id, producer_id, kind }` |
+| `consume { transport_id, producer_id, rtp_capabilities }` (chỉ controller) | `consumed { consumer_id, producer_id, kind, rtp_parameters }` — khởi tạo ở trạng thái **tạm dừng** |
+| `resume-consumer { consumer_id }` | `consumer-resumed { consumer_id }` |
+| `get-producers` (chỉ controller) | `producers { producers: [{ member_id, producer_id, kind }] }` — dùng khi vào muộn/kết nối lại |
+| *(chủ của một producer rời/bị kick)* | `producer-closed { member_id, producer_id }` |
+| *(message sai định dạng / sai vai trò / id không tồn tại)* | `error { message, request_id }` |
+
+Sau khi transport kết nối xong, luồng RTP đi thẳng giữa thiết bị và worker
+mediasoup qua UDP — không còn đi qua socket này nữa. Đóng socket (từ phía
+nào cũng vậy) sẽ lập tức dọn transport/producer/consumer của người đó và báo
+cho cả phòng biết; `leave_room`/`kick_member`/`close_room` cũng chủ động
+đóng socket từ phía server, nên luồng hình của một máy Remote bị kick sẽ mất
+ngay cả khi client của máy đó không xử lý lệnh `leave_room`.
 
 #### `POST /rooms/{room_id}/recording/start` 🔒 — `start_recording`
 Body: `{ "target": "all" | ["member_id", ...], "config"?: { "resolution"?, "fps"?, "max_duration"? }, "client_command_id" }`.
@@ -425,9 +478,15 @@ Cài đặt đúng theo mục 1.6 của đặc tả (`src/utils/codes.ts`):
   giao hoàn toàn qua `pending_commands` khi polling `sync_device`, và ứng
   dụng vẫn chạy đủ chức năng nếu không có socket, đúng như ghi chú ở mục 1.5
   của đặc tả.
-- **Chưa có luồng xem trực tiếp thật.** `get_preview_token` trả đúng cấu
-  trúc dữ liệu nhưng `stream_url` luôn là `null` — mã nguồn này chưa có
-  media server WebRTC/HLS, chỉ có luồng upload theo chunk sau khi quay xong.
+- **Xem trực tiếp chưa có TURN server và chưa có SDK client đi kèm.** Kênh
+  WebSocket báo hiệu mediasoup và SFU là thật (xem `get_preview_token` /
+  `GET /rooms/{room_id}/media`), nhưng `MEDIASOUP_ANNOUNCED_IP` mặc định
+  chưa được đặt, nên ICE candidate chỉ hoạt động với client cùng mạng LAN
+  với server — cần đặt biến này thành IP public của server nếu triển khai
+  ngoài phạm vi demo LAN. Trạng thái room/transport của mediasoup chỉ nằm
+  trong bộ nhớ (xem ghi chú SQLite bên dưới), và chưa ghi lại luồng xem trực
+  tiếp phía server — việc quay/lưu clip vẫn đi theo đường upload chunk lên
+  MinIO như cũ.
 - **Chưa tích hợp nhà cung cấp email/SMS thật.** `get_verify_code` sinh và
   lưu mã, rồi ghi log ở server; việc gửi thật nằm ngoài phạm vi mốc này.
 - **Chưa cài đặt `create_share_link`/`revoke_share_link`.** Hai API này được
@@ -459,8 +518,9 @@ src/
     devices/                Đăng ký/liệt kê/cấu hình/push-token thiết bị + sync_device
     videos/                 CRUD thư viện + luồng upload theo chunk
     rooms/                  Mã mời, sync_room, điều khiển quay + camera
+    media/                  WebSocket báo hiệu mediasoup, vòng đời Router/Transport
     recording-sessions/     get_recording_session
     app/                    check_new_version
-  plugins/                  Plugin fastify cho jwt, minio
+  plugins/                  Plugin fastify cho jwt, minio, mediasoup
   utils/                    Khuôn phản hồi, mã lỗi, kiểm tra dữ liệu đầu vào, băm mật khẩu
 ```

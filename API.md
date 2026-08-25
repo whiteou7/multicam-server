@@ -12,8 +12,11 @@ Implements the 15/8, 22/8 and 29/8 milestones from
 3. Room/invite-code pairing, periodic `sync_device`/`sync_room` polling,
    recording control (start/stop across every Remote in a room), and
    per-member camera control (flash/zoom) — the Controller ↔ Remote loop from
-   § 2.8-2.9, delivered entirely over polling (see
+   § 2.8-2.9, delivered over polling (see
    [Known simplifications](#known-simplifications-for-this-milestone)).
+   Live preview is the one part of this loop that isn't polling: a mediasoup
+   SFU + WebSocket signaling channel now carries real camera streams from
+   each Remote to the Controller (see `get_preview_token` below).
 4. Remaining device-management and password-recovery endpoints
    (`set_device_config`, `delete_device`, `set_devtoken`,
    `get_verify_code`/`forgot_password`/`change_password`).
@@ -271,13 +274,15 @@ Returns a presigned MinIO GET URL (`DOWNLOAD_URL_TTL_SECONDS`, default 10 min), 
 
 A Controller creates a room and shares its 6-character invite code; Remotes
 join and grant control; the Controller starts/stops recording and adjusts
-camera settings across the whole room. All of it is driven by
-`sync_device`/`sync_room` polling — see
+camera settings across the whole room. Room/recording/camera control is
+driven by `sync_device`/`sync_room` polling — see
 [Known simplifications](#known-simplifications-for-this-milestone) for why
-there's no push socket or live-preview stream in this milestone. Every route
-below except `POST /rooms` and `POST /rooms/join` requires the caller to be
-the room's owner (Controller) — enforced by ownership, not just role, so it
-also implicitly rejects other Controllers' rooms.
+there's no push socket for that part. Live preview is the exception: it runs
+over a separate mediasoup WebSocket (`GET /rooms/{room_id}/media`, documented
+under `get_preview_token` below). Every route below except `POST /rooms` and
+`POST /rooms/join` requires the caller to be the room's owner (Controller) —
+enforced by ownership, not just role, so it also implicitly rejects other
+Controllers' rooms.
 
 #### `POST /rooms` 🔒 — `create_room` — **Controller only**
 Body: `{ "room_name"?, "max_members"? }` (default 8). Requires the caller's
@@ -332,11 +337,57 @@ Body: `{ "grant_control": 0 | 1 }`. Only the Remote device that owns the
 membership may call this — a Controller can never force-grant itself control.
 
 #### `POST /rooms/{room_id}/preview-token` 🔒 — `get_preview_token`
-Body: `{ "quality": "low"|"medium", "protocol": "hls"|"webrtc" }`. Returns
-`{ preview_token, expires_in, streams: [{ member_id, stream_url }] }` —
-**`stream_url` is always `null`**: there's no WebRTC/HLS media server in this
-codebase, only post-hoc chunked upload to MinIO. The contract shape is real
-so a grid UI can already bind `member_id` → tile.
+Body: `{ "quality": "low"|"medium", "protocol": "hls"|"webrtc" }` — accepted
+for spec compatibility but not yet acted on (every room gets one mediasoup
+Router regardless of `quality`/`protocol`). Creates the room's mediasoup
+Router on first call and returns what's needed to open the signaling socket
+below:
+```json
+{
+  "preview_token": "...",
+  "expires_in": 300,
+  "signaling_url": "/it4788/api/v1/rooms/{room_id}/media",
+  "rtp_capabilities": { "codecs": [ /* mediasoup RtpCodecCapability[] */ ], "headerExtensions": [ "..." ] },
+  "streams": [ { "member_id": "...", "is_online": 1 } ]
+}
+```
+`streams` is just the current room roster for convenience — it does **not**
+list active producers. A Remote may join or start producing after this
+token was issued, so producers are only ever announced live over the socket
+(`new-producer`, below).
+
+#### `GET /rooms/{room_id}/media` 🔌 — mediasoup signaling WebSocket
+Upgrade request, authenticated the same way as every other route (`Authorization: Bearer <access_token>` header on the handshake). Role is inferred, not
+declared by the client:
+- caller is the room's owner device → **controller**, may only open `recv`
+  transports and `consume`.
+- caller is an active Remote member's device → **remote**, `participant_id`
+  is that `member_id`, may only open a `send` transport and `produce`.
+Anyone else gets an `error` message and the socket is closed.
+
+All messages are JSON. Echo back the `request_id` you sent so responses can
+be matched to requests; server-pushed events (`new-producer`,
+`producer-closed`) have no `request_id`.
+
+| → client-to-server | ← server response/event |
+|---|---|
+| *(on connect)* | `welcome { participant_id, role, rtp_capabilities }` |
+| `create-transport { direction: "send"\|"recv" }` | `transport-created { transport_id, ice_parameters, ice_candidates, dtls_parameters }` |
+| `connect-transport { transport_id, dtls_parameters }` | `transport-connected { transport_id }` |
+| `produce { transport_id, kind, rtp_parameters }` (remote only) | `produced { producer_id }`, then every other participant gets `new-producer { member_id, producer_id, kind }` |
+| `consume { transport_id, producer_id, rtp_capabilities }` (controller only) | `consumed { consumer_id, producer_id, kind, rtp_parameters }` — starts **paused** |
+| `resume-consumer { consumer_id }` | `consumer-resumed { consumer_id }` |
+| `get-producers` (controller only) | `producers { producers: [{ member_id, producer_id, kind }] }` — for late-join/reconnect |
+| *(any producer's owner leaves/is kicked)* | `producer-closed { member_id, producer_id }` |
+| *(malformed message / wrong role / unknown id)* | `error { message, request_id }` |
+
+Once a transport is connected, RTP media flows directly between the device
+and the mediasoup worker over UDP — it never touches this socket again.
+Closing the socket (from either side) immediately tears down that
+participant's transports/producers/consumers and notifies the rest of the
+room; `leave_room`/`kick_member`/`close_room` also force the socket closed
+server-side, so a kicked Remote's stream disappears even if its client never
+reacts to the `leave_room` command.
 
 #### `POST /rooms/{room_id}/recording/start` 🔒 — `start_recording`
 Body: `{ "target": "all" | ["member_id", ...], "config"?: { "resolution"?, "fps"?, "max_duration"? }, "client_command_id" }`.
@@ -426,9 +477,14 @@ Implemented per spec § 1.6 (`src/utils/codes.ts`):
   (`start_record`/`stop_record`/`camera_config`/`leave_room`/`logout`) are
   delivered entirely through `pending_commands` in `sync_device` polling, and
   the app is fully functional without a socket per the spec's own note in § 1.5.
-- **No live preview streaming.** `get_preview_token` returns the contracted
-  shape but every `stream_url` is `null` — there's no WebRTC/HLS media server
-  in this codebase, only post-hoc chunked upload to MinIO.
+- **Live preview has no TURN server and no bundled client SDK.** The
+  mediasoup signaling WebSocket and SFU are real (see `get_preview_token` /
+  `GET /rooms/{room_id}/media`), but `MEDIASOUP_ANNOUNCED_IP` is unset by
+  default, so ICE candidates only work for clients on the same network as
+  the server — set it to the server's public IP for anything beyond a LAN
+  demo. mediasoup's room/transport state is in-memory only (see the SQLite
+  note below), and there's no server-side recording of the live stream —
+  recording still goes through the existing chunked-upload-to-MinIO path.
 - **No real email/SMS provider.** `get_verify_code` generates and stores a
   code and logs it server-side; delivery is out of scope.
 - **`create_share_link`/`revoke_share_link` are not implemented.** They're
@@ -458,8 +514,9 @@ src/
     devices/                register/list/config/push-token + sync_device
     videos/                 library CRUD + chunked upload flow
     rooms/                  invite codes, sync_room, recording + camera control
+    media/                  mediasoup signaling WS, Router/Transport lifecycle
     recording-sessions/     get_recording_session
     app/                    check_new_version
-  plugins/                  jwt, minio fastify plugins
+  plugins/                  jwt, minio, mediasoup fastify plugins
   utils/                    response envelope, error codes, validation, password hashing
 ```

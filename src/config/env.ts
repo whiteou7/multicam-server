@@ -34,4 +34,15 @@ export const env = {
     sessionTtlMs: Number(process.env.UPLOAD_SESSION_TTL_MS ?? 6 * 60 * 60 * 1000), // 6h
     downloadUrlTtlSeconds: Number(process.env.DOWNLOAD_URL_TTL_SECONDS ?? 600), // 10 min
   },
+
+  mediasoup: {
+    numWorkers: Number(process.env.MEDIASOUP_NUM_WORKERS ?? 1),
+    rtcMinPort: Number(process.env.MEDIASOUP_RTC_MIN_PORT ?? 40000),
+    rtcMaxPort: Number(process.env.MEDIASOUP_RTC_MAX_PORT ?? 49999),
+    // LAN/dev default: mediasoup listens on all interfaces and doesn't rewrite
+    // its candidate IP. Set MEDIASOUP_ANNOUNCED_IP to the server's public IP
+    // for any deployment where clients aren't on the same network.
+    listenIp: process.env.MEDIASOUP_LISTEN_IP ?? "0.0.0.0",
+    announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || null,
+  },
 };

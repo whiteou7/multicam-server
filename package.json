@@ -15,10 +15,12 @@
   "dependencies": {
     "@fastify/cors": "^9.0.1",
     "@fastify/jwt": "^8.0.1",
+    "@fastify/websocket": "^10.0.1",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "fastify-plugin": "^4.5.1",
+    "mediasoup": "^3.26.0",
     "minio": "^8.0.1"
   },
   "devDependencies": {

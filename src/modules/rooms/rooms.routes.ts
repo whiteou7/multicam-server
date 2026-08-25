@@ -188,7 +188,7 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
       const body = request.body ?? ({} as PreviewTokenBody);
       assertOneOf(requireField(body.quality, "quality"), ["low", "medium"] as const, "quality");
       assertOneOf(requireField(body.protocol, "protocol"), ["hls", "webrtc"] as const, "protocol");
-      return ok(roomsService.getPreviewToken(room));
+      return ok(await roomsService.getPreviewToken(app, room));
     }
   );
 

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { FastifyInstance } from "fastify";
 import { devicesRepo } from "../../db/repositories/devices.repo";
 import { deviceCommandsRepo } from "../../db/repositories/device-commands.repo";
 import { recordingSessionsRepo } from "../../db/repositories/recording-sessions.repo";
 import { RoomMemberRow, roomMembersRepo } from "../../db/repositories/room-members.repo";
 import { RoomRow, roomsRepo } from "../../db/repositories/rooms.repo";
 import { ApiError, CODE } from "../../utils/codes";
+import { closeMemberMedia, closeRoomMedia, getOrCreateRoomMedia } from "../media/media.service";
 
 const INVITE_CODE_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 const INVITE_CODE_TTL_MS = 10 * 60 * 1000; // 10 min
@@ -35,7 +37,10 @@ function memberPublicShape(m: RoomMemberRow) {
     upload_state: m.upload_state,
     upload_percent: m.upload_percent,
     error_code: m.error_code,
-    preview_url: null, // no WebRTC/HLS media server in this codebase — see README
+    // Not a per-member field in the mediasoup model — call get_preview_token
+    // once for router rtp_capabilities + the room's WS signaling endpoint,
+    // then consume each member's producer as it announces itself.
+    preview_url: null,
     last_seen: m.last_seen,
   };
 }
@@ -180,6 +185,7 @@ export function kickMember(room: RoomRow, memberId: string) {
   }
   const revision = roomsRepo.bumpRevision(room.id);
   roomMembersRepo.setLeft(memberId, revision);
+  closeMemberMedia(room.id, memberId);
   deviceCommandsRepo.insert({
     id: randomUUID(),
     device_id: member.device_id,
@@ -223,6 +229,7 @@ export function closeRoom(room: RoomRow) {
   }
   roomsRepo.setSessionId(room.id, null);
   roomsRepo.close(room.id);
+  closeRoomMedia(room.id);
 
   return {
     closed_at: new Date().toISOString(),
@@ -237,6 +244,7 @@ export function leaveRoom(userId: string, deviceId: string, roomId: string) {
   }
   const revision = roomsRepo.bumpRevision(roomId);
   roomMembersRepo.setLeft(member.id, revision);
+  closeMemberMedia(roomId, member.id);
 }
 
 export function setMemberPermission(
@@ -257,15 +265,20 @@ export function setMemberPermission(
   return { member_id: memberId, has_granted_control: grantControl };
 }
 
-export function getPreviewToken(room: RoomRow) {
+// Hands back what a client needs to open the mediasoup signaling socket:
+// the room's router rtp_capabilities (so it knows what it can send/receive)
+// and the WS path itself. Actual per-member streams arrive as "new-producer"
+// events over that socket as each Remote starts producing, not as a list
+// here — a Remote may join/produce after this token was issued.
+export async function getPreviewToken(app: FastifyInstance, room: RoomRow) {
   const members = roomMembersRepo.listActiveByRoom(room.id);
+  const roomMedia = await getOrCreateRoomMedia(app, room.id);
   return {
     preview_token: randomUUID(),
     expires_in: PREVIEW_TOKEN_TTL_SECONDS,
-    // No WebRTC/HLS media server in this codebase yet — see README "Known
-    // simplifications". stream_url is always null; the shape is real so the
-    // grid UI can already bind member_id -> tile.
-    streams: members.map((m) => ({ member_id: m.id, stream_url: null as string | null })),
+    signaling_url: `/it4788/api/v1/rooms/${room.id}/media`,
+    rtp_capabilities: roomMedia.router.rtpCapabilities,
+    streams: members.map((m) => ({ member_id: m.id, is_online: m.is_online })),
   };
 }
 
