@@ -46,7 +46,8 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
       let role: Role;
       let participantId: string;
 
-      if (auth.userId === room.owner_id && auth.deviceId === room.owner_device_id) {
+      // Controller chỉ cần userId khớp owner_id (không bắt deviceId, vì cùng user có thể có nhiều device web/app)
+      if (auth.userId === room.owner_id) {
         role = "controller";
         participantId = CONTROLLER_PARTICIPANT_ID;
       } else {

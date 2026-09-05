@@ -13,6 +13,7 @@ import roomsRoutes from "./modules/rooms/rooms.routes";
 import mediaWsRoutes from "./modules/media/media.ws.routes";
 import recordingSessionsRoutes from "./modules/recording-sessions/recording-sessions.routes";
 import appRoutes from "./modules/app/app.routes";
+import path from "path";
 import { env } from "./config/env";
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -35,23 +36,27 @@ export async function buildApp(): Promise<FastifyInstance> {
     (_req, body, done) => done(null, body)
   );
 
-  // Registered before route plugins: Fastify's encapsulation captures the
-  // error/not-found handler active in a context at the time its routes are
-  // defined, so this must run first to apply to every route below.
-  app.setNotFoundHandler((_request, reply) => {
-    reply.status(404).send({ code: CODE.NOT_EXISTED, message: MESSAGE[CODE.NOT_EXISTED], data: {} });
-  });
-
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ApiError) {
       reply.status(error.httpStatus).send({ code: error.code, message: error.message, data: {} });
       return;
     }
-    // fastify validation / unexpected errors -> generic "can't connect" per spec section 1.3
     request.log.error(error);
     reply
       .status(500)
       .send({ code: CODE.EXCEPTION_ERROR, message: MESSAGE[CODE.EXCEPTION_ERROR], data: {} });
+  });
+
+  // dashboard web cho Chrome — http://localhost:PORT/
+  app.get("/", async (_req, reply) => {
+    const fs = await import("fs");
+    const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
+    return reply.type("text/html").send(html);
+  });
+  app.get("/mediasoup-client.bundle.js", async (_req, reply) => {
+    const fs = await import("fs");
+    const js = fs.readFileSync(path.join(__dirname, "../public/mediasoup-client.bundle.js"), "utf8");
+    return reply.type("application/javascript").send(js);
   });
 
   app.get("/health", async () => ({ code: CODE.OK, message: "OK", data: { status: "up" } }));
@@ -66,6 +71,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(mediaWsRoutes, { prefix: API_PREFIX });
   await app.register(recordingSessionsRoutes, { prefix: API_PREFIX });
   await app.register(appRoutes, { prefix: API_PREFIX });
+
+  // Must be last: catch all unmatched API routes as 9992 (must be after static/health)
+  app.setNotFoundHandler((_request, reply) => {
+    reply.status(404).send({ code: CODE.NOT_EXISTED, message: MESSAGE[CODE.NOT_EXISTED], data: {} });
+  });
 
   return app;
 }

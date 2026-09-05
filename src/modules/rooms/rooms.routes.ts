@@ -184,7 +184,14 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
     "/rooms/:room_id/preview-token",
     { preHandler: authenticate },
     async (request) => {
-      const room = roomsService.requireOwnerRoom(request.params.room_id, request.auth!.userId);
+      // Cho phép mọi thành viên trong phòng (owner hoặc member) lấy preview-token, không chỉ owner
+      const { roomsRepo } = await import("../../db/repositories/rooms.repo");
+      const { roomMembersRepo } = await import("../../db/repositories/room-members.repo");
+      const room = roomsRepo.findById(request.params.room_id);
+      if (!room) throw new ApiError(CODE.NOT_EXISTED);
+      const isOwner = room.owner_id === request.auth!.userId;
+      const isMember = !!roomMembersRepo.findActiveByRoomAndDevice(room.id, request.auth!.deviceId);
+      if (!isOwner && !isMember) throw new ApiError(CODE.NOT_ACCESS, "Bạn không ở trong phòng này");
       const body = request.body ?? ({} as PreviewTokenBody);
       assertOneOf(requireField(body.quality, "quality"), ["low", "medium"] as const, "quality");
       assertOneOf(requireField(body.protocol, "protocol"), ["hls", "webrtc"] as const, "protocol");

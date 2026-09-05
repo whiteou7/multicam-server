@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Multi-Cam Dashboard — multicam-server</title>
+<style>
+*{box-sizing:border-box}body{font-family:system-ui,Segoe UI,sans-serif;background:#f1f5f9;color:#0f172a;margin:0;padding:16px}
+header{display:flex;justify-content:space-between;align-items:center;background:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.card{background:#fff;border-radius:12px;padding:16px;margin-top:16px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+input,select,button{padding:8px 10px;border-radius:8px;border:1px solid #e2e8f0;font-size:14px}
+button{background:#2563eb;color:#fff;border:none;cursor:pointer;font-weight:600}
+button.secondary{background:#64748b}button.danger{background:#ef4444}button.success{background:#10b981}
+.small{font-size:12px;color:#64748b}.mono{font-family:monospace}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.videos{max-height:360px;overflow:auto}
+.videoRow{display:flex;justify-content:space-between;align-items:center;padding:8px;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:8px}
+video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;border-radius:12px;object-fit:contain}
+.streams{display:grid;grid-template-columns:1fr;gap:16px}
+.streamBox{background:#000;border-radius:16px;padding:8px;color:#fff;cursor:pointer}
+.streamBox:fullscreen{padding:0;background:#000}
+.streamBox:fullscreen video{max-height:100vh;min-height:100vh;border-radius:0}
+.log{font-family:monospace;font-size:12px;background:#0f172a;color:#a5f3fc;padding:8px;border-radius:8px;max-height:180px;overflow:auto;white-space:pre-wrap}
+</style>
+<script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+<script type="importmap">
+{ "imports": { "mediasoup-client": "/mediasoup-client.bundle.js" } }
+</script>
+</head>
+<body>
+<header>
+  <div><b>🎛️ Multi-Cam Dashboard</b> <span class="small">multicam-server • /it4788/api/v1 • WS mediasoup</span></div>
+  <div><span id="who" class="small"></span> <button id="btnLogout" class="secondary" style="display:none">Đăng xuất</button></div>
+</header>
+
+<div id="loginCard" class="card">
+  <h3>Đăng nhập</h3>
+  <div class="grid">
+    <input id="inpPhone" placeholder="Phone (0900000001)" value="0900000001"/>
+    <input id="inpPass" type="password" placeholder="Mật khẩu" value="Controller@123"/>
+  </div>
+  <div style="margin-top:8px;display:flex;gap:8px">
+    <input id="inpHost" placeholder="Host" value="localhost" style="flex:1"/>
+    <input id="inpPort" placeholder="Port" value="3000" style="width:100px"/>
+    <button id="btnLogin">Đăng nhập</button>
+  </div>
+  <div class="small">Device tự tạo: <span id="devId" class="mono"></span> (Web = 4)</div>
+  <div id="loginMsg" class="small"></div>
+</div>
+
+<div id="main" style="display:none">
+  <div class="card">
+    <h3>📹 Video trên server <button id="btnReloadVideos" class="secondary">Tải lại</button></h3>
+    <div id="videos" class="videos"></div>
+    <video id="player" controls style="display:none;margin-top:10px"></video>
+  </div>
+
+  <div class="card">
+    <h3>🏠 Phòng (Room)</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="btnCreateRoom">Tạo phòng (Controller)</button>
+      <span class="small">Mã mời: <b id="inviteCode" class="mono"></b> <button id="btnRefreshCode" class="secondary">Mã mới</button></span>
+      <span class="small">room_id: <span id="roomId" class="mono"></span></span>
+      <button id="btnCloseRoom" class="danger">Đóng phòng</button>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <input id="inpJoinCode" placeholder="Nhập mã mời để join (Remote)"/>
+      <input id="inpCamName" placeholder="Camera name" value="WebCam"/>
+      <button id="btnJoin">Join</button>
+      <button id="btnLeave" class="secondary">Rời phòng</button>
+    </div>
+    <div id="members" class="small" style="margin-top:8px"></div>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <button id="btnStartRec" class="danger">● Start ALL</button>
+      <button id="btnStopRec" class="secondary">■ Stop ALL</button>
+      <span class="small">rev <span id="rev" class="mono">0</span> • next_sync <span id="nextSync" class="mono"></span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>👁️ Preview mediasoup (SFU)</h3>
+    <div class="small">
+      Controller: <b>recv</b> / Remote tự phát: sẽ tự `produce` nếu có camera. Trên web này bấm <b>Bật preview</b> để `consume`.
+      <span class="small"> (cần `MEDIASOUP_ANNOUNCED_IP` nếu khác LAN)</span>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <button id="btnPreview" class="success">Bật preview (recv)</button>
+      <button id="btnStopPreview" class="secondary">Ngắt</button>
+      <button id="btnProduce" class="secondary">Phát camera (send)</button>
+    </div>
+    <div id="streams" class="streams" style="margin-top:12px"></div>
+    <div id="mLog" class="log" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h3>🧪 API thử nhanh</h3>
+    <div class="small">Base: <span id="apiBase" class="mono"></span> • <a href="/health" target="_blank">/health</a> • <a href="http://localhost:9001" target="_blank">MinIO :9001</a></div>
+    <div id="apiLog" class="log" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<script type="module">
+let mediasoupClient = null;
+async function getMediasoup(){
+  if(mediasoupClient?.Device) return mediasoupClient;
+  if(mediasoupClient?.default?.Device) return mediasoupClient.default;
+  const cdns = ['mediasoup-client', '/mediasoup-client.bundle.js'];
+  let lastErr=null;
+  for(const url of cdns){
+    try{
+      mLog('Đang tải mediasoup-client từ '+url+' ...');
+      const mod = await import(url);
+      // bundle esbuild CJS->ESM bọc trong default, còn importmap ESM có Device trực tiếp
+      const resolved = mod.Device ? mod : (mod.default?.Device ? mod.default : (mod.default || mod));
+      if(!resolved?.Device) throw new Error('module không có Device export: '+Object.keys(mod).join(','));
+      mediasoupClient = resolved;
+      mLog('Tải mediasoup-client OK từ '+url+' (Device='+(!!resolved.Device)+')');
+      return mediasoupClient;
+    }catch(e){ lastErr=e; mLog('Tải từ '+url+' lỗi: '+(e?.message||e)); }
+  }
+  throw new Error('Không tải được mediasoup-client: '+(lastErr?.message||lastErr));
+}
+
+const $ = s => document.querySelector(s);
+const apiLog = (m)=>{ const el=$('#apiLog'); el.textContent += m+'\n'; el.scrollTop=el.scrollHeight; };
+const mLog = (m)=>{ const el=$('#mLog'); el.textContent += new Date().toLocaleTimeString()+' '+m+'\n'; el.scrollTop=el.scrollHeight; };
+let cfg={host:'localhost',port:'3000'}, tokens=null, user=null, deviceId=localStorage.getItem('mc_device_id')||('web_'+Math.random().toString(36).slice(2,8)), roomId=null, syncTimer=null, device=null, recvTr=null, sendTr=null, ws=null, consumers=new Map(); if(!localStorage.getItem('mc_device_id')) localStorage.setItem('mc_device_id', deviceId);
+
+function base(){ return `http://${cfg.host}:${cfg.port}/it4788/api/v1`; }
+function authH(){ return tokens?{Authorization:`Bearer ${tokens.access_token}`}:{}; }
+$('#devId').textContent=deviceId;
+function setCred(h,p){ cfg.host=h; cfg.port=p; localStorage.setItem('mc_host',h); localStorage.setItem('mc_port',p); $('#apiBase').textContent=base(); }
+setCred(localStorage.getItem('mc_host')||'localhost', localStorage.getItem('mc_port')||'3000');
+$('#inpHost').value=cfg.host; $('#inpPort').value=cfg.port;
+
+async function api(path, opts={}){
+  const hasBody = !!opts.body;
+  const res = await fetch(base()+path, { ...opts, headers:{ ...(hasBody?{'Content-Type':'application/json'}:{}), ...authH(), ...(opts.headers||{})}});
+  const j = await res.json().catch(()=>({})); if(j.code!==1000) throw Object.assign(new Error(j.message||`HTTP ${res.status}`),{code:j.code,data:j});
+  return j.data;
+}
+
+$('#btnLogin').onclick = async()=>{
+  const host=$('#inpHost').value.trim()||'localhost', port=$('#inpPort').value.trim()||'3000';
+  setCred(host,port);
+  const phone=$('#inpPhone').value.trim(), password=$('#inpPass').value;
+  $('#loginMsg').textContent='Đang đăng nhập...';
+  try{
+    const data = await api('/auth/login',{method:'POST', headers:{}, body:JSON.stringify({phone,password,device_id:deviceId,device_type:4,device_name:'Web Dashboard'})});
+    tokens={access_token:data.access_token,refresh_token:data.refresh_token}; user=data.user; localStorage.setItem('mc_tokens',JSON.stringify(tokens)); localStorage.setItem('mc_user', JSON.stringify({phone:user.phone,role:data.account_role}));
+    $('#who').textContent = `${user.phone} • ${data.account_role}`; $('#btnLogout').style.display=''; $('#loginCard').style.display='none'; $('#main').style.display='';
+    apiLog('login ok '+data.account_role); loadVideos();
+  }catch(e){ $('#loginMsg').textContent = e.message + (e.code?` (code ${e.code})`: ''); }
+};
+$('#btnLogout').onclick = async()=>{ try{ await api('/auth/logout',{method:'POST'});}catch{} tokens=null; localStorage.removeItem('mc_tokens'); localStorage.removeItem('mc_user'); location.reload(); };
+(function restore(){ const t=localStorage.getItem('mc_tokens'); if(t){ try{ tokens=JSON.parse(t); const u=JSON.parse(localStorage.getItem('mc_user')||'null'); if(u) $('#who').textContent=`${u.phone} • ${u.role}`; $('#loginCard').style.display='none'; $('#main').style.display=''; $('#btnLogout').style.display=''; apiLog('restored token'); loadVideos(); }catch{} } })();
+
+async function loadVideos(){
+  try{ const d = await api(`/videos?index=0&count=20`); const el=$('#videos'); el.innerHTML = (d.videos||[]).map(v=>`<div class="videoRow"><div><b>${v.name||v.id.slice(0,8)}</b> <span class="small">${v.camera_name||''} • ${new Date(v.created_at).toLocaleString()} • ${(v.size/1024/1024).toFixed(1)}MB</span><br><span class="mono small">${v.id}</span></div><div style="display:flex;gap:6px"><button onclick="playVideo('${v.id}')">▶ Xem</button><button class="secondary" onclick="dlVideo('${v.id}')">⬇ Tải</button></div></div>`).join('')||'<span class="small">Chưa có video</span>'; }catch(e){ apiLog('loadVideos: '+e.message); }
+}
+window.playVideo = async(id)=>{ try{ const d=await api(`/videos/${id}`); const v=$('#player'); v.src=d.url; v.style.display=''; v.play(); apiLog('play '+id); }catch(e){ alert(e.message);} };
+window.dlVideo = async(id)=>{ try{ const d=await api(`/videos/${id}/download`); window.open(d.download_url,'_blank'); }catch(e){ alert(e.message);} };
+$('#btnReloadVideos').onclick=loadVideos;
+
+// Rooms
+$('#btnCreateRoom').onclick = async()=>{ try{ const r=await api('/rooms',{method:'POST',body:JSON.stringify({max_members:8})}); roomId=r.room_id; $('#roomId').textContent=roomId; $('#inviteCode').textContent=r.invite_code; apiLog('createRoom '+roomId+' '+r.invite_code); startRoomSync(); }catch(e){ alert(e.message);} };
+$('#btnRefreshCode').onclick = async()=>{ if(!roomId) return alert('Chưa có phòng'); const r=await api(`/rooms/${roomId}/invite-code`,{method:'POST'}); $('#inviteCode').textContent=r.invite_code; };
+$('#btnJoin').onclick = async()=>{ const invite=$('#inpJoinCode').value.trim(); const cam=$('#inpCamName').value.trim()||'WebCam'; const r=await api('/rooms/join',{method:'POST',body:JSON.stringify({invite_code:invite,device_id:deviceId,camera_name:cam,grant_control:true})}); roomId=r.room_id; $('#roomId').textContent=roomId; apiLog('join '+roomId); startRoomSync(); };
+$('#btnLeave').onclick = async()=>{ if(!roomId) return; await api(`/rooms/${roomId}/leave`,{method:'POST'}); stopRoomSync(); roomId=null; $('#roomId').textContent=''; };
+$('#btnCloseRoom').onclick = async()=>{ if(!roomId) return; await api(`/rooms/${roomId}`,{method:'DELETE'}); stopRoomSync(); roomId=null; $('#roomId').textContent=''; };
+$('#btnStartRec').onclick = async()=>{ if(!roomId) return alert('Chưa có phòng'); const r=await api(`/rooms/${roomId}/recording/start`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); apiLog('start '+JSON.stringify(r)); };
+$('#btnStopRec').onclick = async()=>{ if(!roomId) return; const r=await api(`/rooms/${roomId}/recording/stop`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); apiLog('stop '+JSON.stringify(r)); };
+function startRoomSync(){ stopRoomSync(); let rev=0; async function tick(){ if(!roomId) return; try{ const d=await api(`/rooms/${roomId}/sync?since=${rev}`); rev=d.revision; $('#rev').textContent=rev; $('#nextSync').textContent=d.next_sync_in; $('#members').innerHTML = (d.members||[]).map(m=>`${m.camera_name} <span class="mono">${m.member_id.slice(0,6)}</span> online=${m.is_online} rec=${m.recording_state} <button onclick="setCam('${m.member_id}')">flash</button>`).join('<br>')||'no members'; }catch(e){ apiLog('syncRoom '+e.message);} syncTimer=setTimeout(tick, 4000); } tick(); }
+function stopRoomSync(){ if(syncTimer) clearTimeout(syncTimer); syncTimer=null; }
+window.setCam = async(mid)=>{ if(!roomId) return; await api(`/rooms/${roomId}/members/${mid}/camera`,{method:'PUT',body:JSON.stringify({flash_mode:'auto',zoom_factor:2.0,client_command_id:'cam_'+Date.now()})}); apiLog('setCamera '+mid); };
+
+// Mediasoup preview
+let localStream=null;
+$('#btnProduce').onclick = async()=>{
+  if(!roomId) return alert('Tạo/join phòng trước');
+  try{
+    const tok = await api(`/rooms/${roomId}/preview-token`,{method:'POST',body:JSON.stringify({quality:'low',protocol:'webrtc'})});
+    const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+cfg.host+':'+cfg.port+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
+    mLog('produce: connect '+wsUrl); const ws2=new WebSocket(wsUrl);
+    // reuse same logic as preview but produce
+    localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+    const mcP = await getMediasoup(); const dev=new mcP.Device(); await dev.load({routerRtpCapabilities: tok.rtp_capabilities});
+    let reqId=0, pending=new Map();
+    function send(o){ const id='req_'+(++reqId); ws2.send(JSON.stringify({request_id:id,...o})); return new Promise((res,rej)=>{ const t=setTimeout(()=>rej(new Error('timeout')),8000); pending.set(id,{res,rej,t});});}
+    ws2.onmessage=e=>{ const m=JSON.parse(e.data); if(m.request_id&&pending.has(m.request_id)){ const p=pending.get(m.request_id); clearTimeout(p.t); pending.delete(m.request_id); if(m.type==='error') p.rej(new Error(m.message)); else p.res(m);} mLog('<= '+m.type); };
+    await new Promise((res,rej)=>{ ws2.onopen=res; ws2.onerror=rej; });
+    mLog('WS open, create send transport');
+    const tr = await send({type:'create-transport',direction:'send'});
+    const sendTr = dev.createSendTransport({id:tr.transport_id,iceParameters:tr.ice_parameters,iceCandidates:tr.ice_candidates,dtlsParameters:tr.dtls_parameters});
+    sendTr.on('connect',async({dtlsParameters},cb,eb)=>{ try{ await send({type:'connect-transport',transport_id:tr.transport_id,dtls_parameters:dtlsParameters}); cb();}catch(e){eb(e);} });
+    sendTr.on('produce',async({kind,rtpParameters},cb,eb)=>{ try{ const r=await send({type:'produce',transport_id:tr.transport_id,kind,rtp_parameters:rtpParameters}); cb({id:r.producer_id});}catch(e){eb(e);} });
+    for(const t of localStream.getTracks()) await sendTr.produce({track:t});
+    mLog('producing '+localStream.getTracks().length+' tracks');
+  }catch(e){ const msg=e?.message||String(e); const code=e?.code?` [${e.code}]`:''; alert(msg+code); mLog('produce err '+msg+code); console.error(e); }
+};
+
+$('#btnPreview').onclick = async()=>{
+  if(!roomId) return alert('Chưa có phòng');
+  $('#streams').innerHTML=''; consumers.clear();
+  try{
+    const tok = await api(`/rooms/${roomId}/preview-token`,{method:'POST',body:JSON.stringify({quality:'low',protocol:'webrtc'})});
+    const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+cfg.host+':'+cfg.port+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
+    mLog('preview: '+wsUrl);
+    ws = new WebSocket(wsUrl); const mcV = await getMediasoup(); device=new mcV.Device(); await device.load({routerRtpCapabilities: tok.rtp_capabilities});
+    let reqId=0, pending=new Map();
+    function send(o){ const id='req_'+(++reqId); ws.send(JSON.stringify({request_id:id,...o})); return new Promise((res,rej)=>{ const t=setTimeout(()=>rej(new Error('timeout '+o.type)),8000); pending.set(id,{res,rej,t});});}
+    ws.onmessage = async e=>{
+      const m=JSON.parse(e.data); mLog('<= '+m.type+' '+JSON.stringify(m).slice(0,120));
+      if(m.request_id&&pending.has(m.request_id)){ const p=pending.get(m.request_id); clearTimeout(p.t); pending.delete(m.request_id); if(m.type==='error') p.rej(new Error(m.message)); else p.res(m); }
+      if(m.type==='welcome'){ // create recv transport
+        mLog('welcome rtpCapabilities codecs='+ (device.rtpCapabilities.codecs?.length||0));
+        const tr=await send({type:'create-transport',direction:'recv'});
+        mLog('recv candidates '+ JSON.stringify(tr.ice_candidates).slice(0,300));
+        recvTr=device.createRecvTransport({id:tr.transport_id,iceParameters:tr.ice_parameters,iceCandidates:tr.ice_candidates,dtlsParameters:tr.dtls_parameters});
+        recvTr.on('connect',async({dtlsParameters},cb,eb)=>{ try{ mLog('recv connect dtls'); await send({type:'connect-transport',transport_id:tr.transport_id,dtls_parameters:dtlsParameters}); mLog('recv connected'); cb();}catch(e){mLog('recv connect err '+e.message); eb(e);} });
+        recvTr.on('connectionstatechange', s=> mLog('recv connectionstate '+s));
+        const list=await send({type:'get-producers'}); mLog('get-producers count='+(list.producers?.length||0)); for(const p of (list.producers||[])) await doConsume(p);
+        if(!list.producers?.length) mLog('Chưa có producer nào — Remote chưa Phát preview (cần dev-client, không phải Expo Go)');
+      }
+      if(m.type==='new-producer'){ mLog('new-producer kind='+m.kind+' id='+m.producer_id); await doConsume(m); }
+      if(m.type==='producer-closed'){ mLog('producer-closed '+m.producer_id); const el=document.getElementById('s_'+m.producer_id); if(el) el.remove(); }
+    };
+    async function doConsume(p){
+      if(!recvTr) return; if(document.getElementById('s_'+p.producer_id)) { mLog('skip duplicate '+p.producer_id); return; } mLog('doConsume '+p.producer_id+' kind='+p.kind); let r; try{ r=await send({type:'consume',transport_id:recvTr.id,producer_id:p.producer_id,rtp_capabilities:device.rtpCapabilities}); }catch(e){ mLog('consume send err '+ (e?.message||String(e))); return; }
+      let con; try{ con=await recvTr.consume({id:r.consumer_id, producerId:r.producer_id, kind:r.kind, rtpParameters:r.rtp_parameters}); }catch(e){ mLog('consume err '+ (e?.message||String(e))); return; }
+      mLog('consumed '+con.id+' kind='+con.kind+' track muted='+con.track.muted+' enabled='+con.track.enabled+' readyState='+con.track.readyState);
+      const stream=new MediaStream([con.track]); consumers.set(con.id,con);
+      const box=document.createElement('div'); box.className='streamBox'; box.id='s_'+p.producer_id;
+      box.innerHTML=`<div class="small">${p.member_id.slice(0,6)} • ${p.kind}</div>`;
+      // dashboard chỉ xem video, bỏ nghe audio để đỡ vọng
+      if(con.kind==='audio'){ mLog('skip audio consume (dashboard muted) '+con.id); await send({type:'resume-consumer',consumer_id:con.id}); return; }
+      let el; el=document.createElement('video'); el.autoplay=true; el.playsInline=true; el.muted=true; el.srcObject=stream; el.style.width='100%'; el.style.height='auto'; el.onloadedmetadata=()=>{ mLog('video metadata '+el.videoWidth+'x'+el.videoHeight); el.play().catch(e=>mLog('play err '+e.message)); };
+      box.appendChild(el); box.onclick=()=>{ if(document.fullscreenElement) document.exitFullscreen(); else box.requestFullscreen().catch(()=>{}); }; document.getElementById('streams').appendChild(box);
+      con.track.onunmute=()=>{ mLog('track unmuted '+con.id+' kind='+con.kind); if(con.kind==='video' && el.videoWidth===0) el.play().catch(()=>{}); };
+      con.track.onmute=()=>mLog('track muted '+con.id);
+      con.track.onended=()=>mLog('track ended '+con.id);
+      try{ await send({type:'resume-consumer',consumer_id:con.id}); mLog('resume-consumer sent '+con.id); }catch(e){ mLog('resume err '+(e?.message||String(e))); }
+      setTimeout(()=>mLog('track after resume muted='+con.track.muted+' readyState='+con.track.readyState), 1500);
+      // giảm vọng: dashboard không phát lại mic, chỉ nghe
+      if(con.kind==='audio') { try{ con.track.enabled=true; }catch{} }
+    }
+    ws.onerror = (ev)=>{ mLog('WS error event type='+ ev?.type + ' ' + String(ev)); };
+    ws.onclose = (ev)=>{ mLog('WS closed code='+ev?.code+' reason='+ev?.reason); };
+    await new Promise((res,rej)=>{ ws.onopen=res; ws.onerror=(ev)=>rej(new Error('WS error '+(ev?.type||String(ev))+' code='+(ev?.code||''))); });
+    mLog('WS open, chờ welcome...');
+  }catch(e){ const msg=e?.message||String(e); const code=e?.code?` [${e.code}]`:''; mLog('preview err '+msg+code); alert(msg+code); console.error(e); }
+};
+$('#btnStopPreview').onclick=()=>{ try{ ws?.close(); }catch{} ws=null; if(recvTr) try{recvTr.close();}catch{} recvTr=null; device=null; consumers.clear(); $('#streams').innerHTML=''; mLog('stopped'); };
+</script>
+<script>
+// Fallback login handler (chạy cả khi type="module" lỗi) — đảm bảo bấm Đăng nhập luôn gọi API
+(function(){
+  function fallbackBase(){
+    try{
+      const h = (document.getElementById('inpHost')?.value||localStorage.getItem('mc_host')||'localhost').trim()||'localhost';
+      const p = (document.getElementById('inpPort')?.value||localStorage.getItem('mc_port')||'3000').trim()||'3000';
+      return 'http://'+h+':'+p+'/it4788/api/v1';
+    }catch{ return 'http://localhost:3000/it4788/api/v1'; }
+  }
+  document.addEventListener('DOMContentLoaded', ()=>{
+    const btn=document.getElementById('btnLogin');
+    if(!btn) return;
+    // nếu module đã gán onclick thì không ghi đè, chỉ log
+    btn.addEventListener('click', ()=>{ console.log('[fallback] btnLogin clicked', new Date().toISOString()); const msgEl=document.getElementById('loginMsg'); if(msgEl && !msgEl.textContent) msgEl.textContent='Đang đăng nhập (fallback)...'; });
+  });
+  // Expose để test trong Console: fallbackLogin()
+  window.fallbackLogin = async()=>{
+    const phone=document.getElementById('inpPhone')?.value.trim();
+    const password=document.getElementById('inpPass')?.value;
+    const host=document.getElementById('inpHost')?.value.trim()||'localhost';
+    const port=document.getElementById('inpPort')?.value.trim()||'3000';
+    const devId = localStorage.getItem('mc_device_id')||('web_'+Math.random().toString(36).slice(2,8));
+    console.log('fallbackLogin', {phone, host, port, devId, base: fallbackBase()});
+    const res=await fetch(fallbackBase()+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,password,device_id:devId,device_type:4,device_name:'Web Dashboard'})});
+    const j=await res.json();
+    console.log('fallbackLogin result', j);
+    return j;
+  };
+})();
+</script>
+</body>
+</html>

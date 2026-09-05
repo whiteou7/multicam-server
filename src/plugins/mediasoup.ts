@@ -13,7 +13,7 @@ export const MEDIA_CODECS: mediasoup.types.RouterRtpCodecCapability[] = [
     kind: "video",
     mimeType: "video/VP8",
     clockRate: 90000,
-    parameters: { "x-google-start-bitrate": 1000 },
+    parameters: { "x-google-start-bitrate": 2500 },
   },
   {
     kind: "video",
@@ -23,7 +23,7 @@ export const MEDIA_CODECS: mediasoup.types.RouterRtpCodecCapability[] = [
       "packetization-mode": 1,
       "profile-level-id": "42e01f",
       "level-asymmetry-allowed": 1,
-      "x-google-start-bitrate": 1000,
+      "x-google-start-bitrate": 2500,
     },
   },
 ];

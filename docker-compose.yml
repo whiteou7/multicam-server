@@ -19,7 +19,9 @@ services:
   backend:
     build: .
     ports:
-      - "${PORT:-3000}:3000"
+      - "0.0.0.0:3000:3000"
+      - "0.0.0.0:40100-40199:40100-40199/udp"
+      - "0.0.0.0:40100-40199:40100-40199/tcp"
     environment:
       PORT: 3000
       HOST: 0.0.0.0
@@ -32,6 +34,10 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-multicam-videos}
+      MEDIASOUP_LISTEN_IP: 0.0.0.0
+      MEDIASOUP_ANNOUNCED_IP: ${MEDIASOUP_ANNOUNCED_IP:-192.168.1.6}
+      MEDIASOUP_RTC_MIN_PORT: 40100
+      MEDIASOUP_RTC_MAX_PORT: 40199
     volumes:
       - backend-data:/app/data
     depends_on:

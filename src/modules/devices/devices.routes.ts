@@ -45,9 +45,8 @@ interface SyncDeviceBody {
 
 function requireOwnDevice(deviceId: string, userId: string) {
   const device = devicesRepo.findById(deviceId);
-  if (!device || device.user_id !== userId) {
-    throw new ApiError(CODE.NOT_EXISTED);
-  }
+  if (!device) throw new ApiError(CODE.NOT_EXISTED, `Device ${deviceId} not found`);
+  if (device.user_id !== userId) throw new ApiError(CODE.NOT_EXISTED, `Device ${deviceId} not owned by user`);
   return device;
 }
 

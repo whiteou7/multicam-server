@@ -12,6 +12,8 @@ RUN npm install
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY public ./public
+RUN npx --yes esbuild node_modules/mediasoup-client/lib/index.js --bundle --format=esm --outfile=public/mediasoup-client.bundle.js --platform=browser || echo "esbuild bundle failed, continuing"
 RUN npm run build
 
 FROM node:20-bookworm-slim AS runtime
@@ -20,6 +22,7 @@ ENV NODE_ENV=production
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/public ./public
 COPY package.json ./
 
 RUN mkdir -p /app/data/upload-tmp
