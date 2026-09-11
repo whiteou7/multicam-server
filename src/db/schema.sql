@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS rooms (
   invite_code TEXT NOT NULL,
   invite_code_expires_at TEXT NOT NULL,
   max_members INTEGER NOT NULL DEFAULT 8,
+  -- 1 = auto-approve join (default), 0 = owner must approve each joiner
+  auto_approve INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'open', -- open | closed
   session_id TEXT, -- current active recording_sessions.id, if recording
   revision INTEGER NOT NULL DEFAULT 0,
@@ -130,6 +132,8 @@ CREATE TABLE IF NOT EXISTS room_members (
   zoom_factor REAL DEFAULT 1.0,
   last_command_id TEXT,
   last_seen TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  -- approved = active in room | pending = awaiting owner approval | denied = rejected
+  join_status TEXT NOT NULL DEFAULT 'approved',
   joined_revision INTEGER NOT NULL DEFAULT 0,
   left_revision INTEGER,
   joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

@@ -8,6 +8,7 @@ export interface RoomRow {
   invite_code: string;
   invite_code_expires_at: string;
   max_members: number;
+  auto_approve: number;
   status: "open" | "closed";
   session_id: string | null;
   revision: number;
@@ -24,11 +25,12 @@ export const roomsRepo = {
     invite_code: string;
     invite_code_expires_at: string;
     max_members: number;
+    auto_approve?: number;
   }): void {
     db.prepare(
-      `INSERT INTO rooms (id, owner_id, owner_device_id, room_name, invite_code, invite_code_expires_at, max_members)
-       VALUES (@id, @owner_id, @owner_device_id, @room_name, @invite_code, @invite_code_expires_at, @max_members)`
-    ).run(room);
+      `INSERT INTO rooms (id, owner_id, owner_device_id, room_name, invite_code, invite_code_expires_at, max_members, auto_approve)
+       VALUES (@id, @owner_id, @owner_device_id, @room_name, @invite_code, @invite_code_expires_at, @max_members, @auto_approve)`
+    ).run({ ...room, auto_approve: room.auto_approve ?? 1 });
   },
 
   findById(id: string): RoomRow | undefined {

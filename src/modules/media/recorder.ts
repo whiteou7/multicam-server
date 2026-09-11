@@ -173,15 +173,31 @@ class RecorderService {
       return;
     }
 
-    // Debounce ngắn để audio+video kịp tụ lại trong cùng 1 SDP / 1 ffmpeg.
+    // Debounce đủ lâu để audio+video kịp tụ lại trong cùng 1 SDP / 1 ffmpeg
+    // (app thường produce audio trước, video sau ~0.3-1s).
     if (!rec.startTimer) {
       rec.startTimer = setTimeout(() => {
         rec!.startTimer = null;
         this.spawnFfmpeg(app, roomId, rec!);
         for (const s of rec!.streams) {
-          if (!s.closed) s.consumer.resume().catch(() => undefined);
+          if (s.closed) continue;
+          s.consumer.resume().catch(() => undefined);
+          // Ép producer bơm keyframe ngay — VP8 không có SPS/PPS, nếu ffmpeg start
+          // giữa GOP sẽ decode trễ; hơn nữa muxer mp4 cần keyframe đầu. Gọi 2 lần.
+          void this.requestKeyframe(s.consumer);
         }
-      }, 400);
+      }, 1200);
+    }
+  }
+
+  private async requestKeyframe(consumer: mediasoup.types.Consumer): Promise<void> {
+    if (consumer.kind !== "video") return;
+    try {
+      await consumer.requestKeyFrame();
+      await new Promise((r) => setTimeout(r, 300));
+      if (!consumer.closed) await consumer.requestKeyFrame();
+    } catch {
+      /* producer có thể không hỗ trợ PLI — bỏ qua */
     }
   }
 
@@ -258,8 +274,8 @@ class RecorderService {
       // Debug (upload=false): bật info + -stats để stderr cho thấy ffmpeg nhận gói/bitrate hay không.
       "-loglevel", env.recording.upload ? "warning" : "info",
       "-protocol_whitelist", "file,udp,rtp",
-      // Để RTP demuxer chờ đủ keyframe (VP8 không có SPS/PPS) trước khi viết header mp4
-      "-analyzeduration", "5000000", "-probesize", "50000000",
+      // Probe/analyze vừa phải: quá lớn làm demuxer trì hoãn đọc socket (mất gói đầu).
+      "-analyzeduration", "1000000", "-probesize", "1000000",
       "-use_wallclock_as_timestamps", "1",
       "-f", "sdp", "-i", rec.sdpFile,
       // PHẢI transcode: nguồn VP8 không có SPS/PPS — `-c copy` vào mp4 chết "dimensions
@@ -269,6 +285,11 @@ class RecorderService {
       // Bắt buộc cho RTP live + wallclock timestamps: muxer mp4 phải đổi về gốc 0,
       // thiếu nó file chỉ ra 36B (moov rỗng) hoặc fail. (đã test trên máy thật)
       "-avoid_negative_ts", "make_zero",
+      // QUAN TRỌNG: keyframe đầu ra đều đặn (1s) để muxer.frag flushes theo GOP —
+      // thiếu nó, GOP đầu tiên bị giữ nguyên trong buffer tới khi có keyframe thứ 2;
+      // broadcast ngắn không có → file ra chỉ ~32B (repro trên máy: 147 frame decode
+      // nhưng file 36B; thêm -g 30 → 262KB). Không quá 1s mất dữ liệu kể cả bị terminate cứng.
+      "-g", "30",
       "-movflags", "frag_keyframe+empty_moov",
       "-y", rec.outFile,
     ];

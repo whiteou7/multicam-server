@@ -1,4 +1,5 @@
 import "dotenv/config";
+import os from "node:os";
 
 function required(name: string, fallback?: string): string {
   const value = process.env[name] ?? fallback;
@@ -55,5 +56,12 @@ export const env = {
     // Bật thì đẩy file MP4 lên MinIO + insert videos. Tắt (false) để debug:
     // giữ nguyên file ở tmpDir, không upload — log đầy đủ thông tin file + stderr ffmpeg.
     upload: (process.env.SERVER_RECORDING_UPLOAD ?? "true") === "true",
+  },
+
+  discovery: {
+    // Quảng bá server qua mDNS (_multicam._tcp) + UDP responder để app trên LAN tự tìm.
+    enabled: (process.env.DISCOVERY_ENABLED ?? "true") === "true",
+    serverName: process.env.SERVER_NAME ?? os.hostname(),
+    udpPort: Number(process.env.DISCOVER_UDP_PORT ?? 55666),
   },
 };

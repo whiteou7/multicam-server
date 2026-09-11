@@ -32,3 +32,25 @@ for (const migration of DEVICE_COLUMN_MIGRATIONS) {
     db.exec(migration.ddl);
   }
 }
+
+// Same idea for rooms / room_members columns added later.
+const LATE_COLUMN_MIGRATIONS: Array<{ table: string; name: string; ddl: string }> = [
+  {
+    table: "rooms",
+    name: "auto_approve",
+    ddl: "ALTER TABLE rooms ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1",
+  },
+  {
+    table: "room_members",
+    name: "join_status",
+    ddl: "ALTER TABLE room_members ADD COLUMN join_status TEXT NOT NULL DEFAULT 'approved'",
+  },
+];
+for (const migration of LATE_COLUMN_MIGRATIONS) {
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info(${migration.table})`).all() as { name: string }[]).map((c) => c.name)
+  );
+  if (!cols.has(migration.name)) {
+    db.exec(migration.ddl);
+  }
+}

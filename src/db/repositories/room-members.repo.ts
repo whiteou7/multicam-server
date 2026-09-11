@@ -21,6 +21,7 @@ export interface RoomMemberRow {
   zoom_factor: number | null;
   last_command_id: string | null;
   last_seen: string;
+  join_status: "approved" | "pending" | "denied";
   joined_revision: number;
   left_revision: number | null;
   joined_at: string;
@@ -35,11 +36,12 @@ export const roomMembersRepo = {
     user_id: string;
     camera_name: string | null;
     joined_revision: number;
+    join_status?: "approved" | "pending";
   }): void {
     db.prepare(
-      `INSERT INTO room_members (id, room_id, device_id, user_id, camera_name, joined_revision)
-       VALUES (@id, @room_id, @device_id, @user_id, @camera_name, @joined_revision)`
-    ).run(member);
+      `INSERT INTO room_members (id, room_id, device_id, user_id, camera_name, joined_revision, join_status)
+       VALUES (@id, @room_id, @device_id, @user_id, @camera_name, @joined_revision, @join_status)`
+    ).run({ ...member, join_status: member.join_status ?? "approved" });
   },
 
   findById(memberId: string): RoomMemberRow | undefined {
@@ -76,8 +78,22 @@ export const roomMembersRepo = {
 
   listActiveByRoom(roomId: string): RoomMemberRow[] {
     return db
-      .prepare<[string]>("SELECT * FROM room_members WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at ASC")
+      .prepare<[string]>(
+        "SELECT * FROM room_members WHERE room_id = ? AND left_at IS NULL AND join_status = 'approved' ORDER BY joined_at ASC"
+      )
       .all(roomId) as RoomMemberRow[];
+  },
+
+  listPendingByRoom(roomId: string): RoomMemberRow[] {
+    return db
+      .prepare<[string]>(
+        "SELECT * FROM room_members WHERE room_id = ? AND left_at IS NULL AND join_status = 'pending' ORDER BY joined_at ASC"
+      )
+      .all(roomId) as RoomMemberRow[];
+  },
+
+  setJoinStatus(memberId: string, joinStatus: "approved" | "pending" | "denied"): void {
+    db.prepare("UPDATE room_members SET join_status = ? WHERE id = ?").run(joinStatus, memberId);
   },
 
   listJoinedSince(roomId: string, sinceRevision: number): RoomMemberRow[] {

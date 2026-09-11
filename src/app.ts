@@ -16,6 +16,9 @@ import appRoutes from "./modules/app/app.routes";
 import path from "path";
 import { env } from "./config/env";
 
+// Matches the base URL declared in specs/v3_...: https://<domain>/it4788/api/v1
+export const API_PREFIX = "/it4788/api/v1";
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger: true,
@@ -61,8 +64,6 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   app.get("/health", async () => ({ code: CODE.OK, message: "OK", data: { status: "up" } }));
 
-  // Matches the base URL declared in specs/v3_...: https://<domain>/it4788/api/v1
-  const API_PREFIX = "/it4788/api/v1";
   await app.register(authRoutes, { prefix: API_PREFIX });
   await app.register(devicesRoutes, { prefix: API_PREFIX });
   await app.register(videosRoutes, { prefix: API_PREFIX });

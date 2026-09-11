@@ -37,6 +37,7 @@ function memberPublicShape(m: RoomMemberRow) {
     upload_state: m.upload_state,
     upload_percent: m.upload_percent,
     error_code: m.error_code,
+    join_status: m.join_status,
     // Not a per-member field in the mediasoup model — call get_preview_token
     // once for router rtp_capabilities + the room's WS signaling endpoint,
     // then consume each member's producer as it announces itself.
@@ -56,7 +57,8 @@ export function createRoom(
   ownerUserId: string,
   ownerDeviceId: string,
   roomName: string | null,
-  maxMembers: number
+  maxMembers: number,
+  autoApprove = 1
 ) {
   const device = devicesRepo.findById(ownerDeviceId);
   if (!device || device.user_id !== ownerUserId) {
@@ -88,6 +90,7 @@ export function createRoom(
     invite_code: inviteCode,
     invite_code_expires_at: expiresAt,
     max_members: maxMembers,
+    auto_approve: autoApprove,
   });
   const room = roomsRepo.findById(id)!;
   return {
@@ -117,13 +120,14 @@ export function joinRoom(
   if (roomMembersRepo.findActiveByDevice(deviceId)) {
     throw new ApiError(CODE.ALREADY_DONE, "Thiết bị đã ở trong một phòng khác");
   }
-  const activeMembers = roomMembersRepo.listActiveByRoom(room.id);
+  const activeMembers = roomMembersRepo.listAllByRoom(room.id).filter((m) => !m.left_at);
   if (activeMembers.length >= room.max_members) {
     throw new ApiError(CODE.MAX_ITEMS_EXCEEDED, "Phòng đã đủ thành viên");
   }
 
   const revision = roomsRepo.bumpRevision(room.id);
   const memberId = randomUUID();
+  const joinStatus = room.auto_approve === 0 ? "pending" : "approved";
   roomMembersRepo.insert({
     id: memberId,
     room_id: room.id,
@@ -131,6 +135,7 @@ export function joinRoom(
     user_id: userId,
     camera_name: cameraName,
     joined_revision: revision,
+    join_status: joinStatus,
   });
 
   const ownerDevice = devicesRepo.findById(room.owner_device_id);
@@ -141,6 +146,7 @@ export function joinRoom(
     room_name: room.room_name,
     owner: { device_id: room.owner_device_id, camera_name: ownerDevice?.camera_name ?? null },
     member_id: memberId,
+    member_join_status: joinStatus,
     members,
   };
 }
@@ -149,10 +155,17 @@ export function getRoomMembers(room: RoomRow) {
   return roomMembersRepo.listActiveByRoom(room.id).map(memberPublicShape);
 }
 
+export function getPendingMembers(room: RoomRow) {
+  return roomMembersRepo.listPendingByRoom(room.id).map(memberPublicShape);
+}
+
 export function syncRoom(room: RoomRow, sinceRevision: number) {
   const activeSession = recordingSessionsRepo.findActiveByRoom(room.id);
   const members = roomMembersRepo.listActiveByRoom(room.id).map(memberPublicShape);
-  const joined = roomMembersRepo.listJoinedSince(room.id, sinceRevision).map(memberPublicShape);
+  const pending = roomMembersRepo.listPendingByRoom(room.id).map(memberPublicShape);
+  const joined = roomMembersRepo.listJoinedSince(room.id, sinceRevision)
+    .filter((m) => m.join_status === "approved")
+    .map(memberPublicShape);
   const left = roomMembersRepo.listLeftSince(room.id, sinceRevision).map((m) => m.id);
 
   return {
@@ -165,6 +178,7 @@ export function syncRoom(room: RoomRow, sinceRevision: number) {
       started_at: activeSession?.started_at ?? null,
     },
     members,
+    pending,
     joined,
     left,
   };
@@ -194,6 +208,52 @@ export function kickMember(room: RoomRow, memberId: string) {
     type: "leave_room",
     payload_json: JSON.stringify({ reason: "kicked" }),
   });
+}
+
+export function approveMember(room: RoomRow, memberId: string) {
+  const member = roomMembersRepo.findById(memberId);
+  if (!member || member.room_id !== room.id || member.left_at) {
+    throw new ApiError(CODE.NOT_EXISTED);
+  }
+  if (member.join_status !== "pending") {
+    throw new ApiError(CODE.ALREADY_DONE, "Thiết bị này không ở trạng thái chờ duyệt");
+  }
+  roomMembersRepo.setJoinStatus(memberId, "approved");
+  roomsRepo.bumpRevision(room.id);
+  // Báo cho Remote biết đã được duyệt (được đưa vào danh sách pending_commands).
+  deviceCommandsRepo.insert({
+    id: randomUUID(),
+    device_id: member.device_id,
+    room_id: room.id,
+    member_id: memberId,
+    type: "join_approved",
+    payload_json: JSON.stringify({ room_id: room.id }),
+  });
+  const approved = roomMembersRepo.findById(memberId)!;
+  return { member: memberPublicShape(approved) };
+}
+
+export function denyMember(room: RoomRow, memberId: string) {
+  const member = roomMembersRepo.findById(memberId);
+  if (!member || member.room_id !== room.id || member.left_at) {
+    throw new ApiError(CODE.NOT_EXISTED);
+  }
+  if (member.join_status !== "pending") {
+    throw new ApiError(CODE.ALREADY_DONE, "Thiết bị này không ở trạng thái chờ duyệt");
+  }
+  const revision = roomsRepo.bumpRevision(room.id);
+  roomMembersRepo.setJoinStatus(memberId, "denied");
+  roomMembersRepo.setLeft(memberId, revision);
+  closeMemberMedia(room.id, memberId);
+  deviceCommandsRepo.insert({
+    id: randomUUID(),
+    device_id: member.device_id,
+    room_id: room.id,
+    member_id: memberId,
+    type: "leave_room",
+    payload_json: JSON.stringify({ reason: "denied" }),
+  });
+  return { member_id: memberId, join_status: "denied" };
 }
 
 export function closeRoom(room: RoomRow) {

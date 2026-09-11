@@ -8,6 +8,7 @@ import * as roomsService from "./rooms.service";
 interface CreateRoomBody {
   room_name?: string;
   max_members?: number;
+  auto_approve?: 0 | 1;
 }
 
 interface JoinRoomBody {
@@ -70,7 +71,8 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
           throw new ApiError(CODE.PARAM_VALUE_INVALID, "max_members must be 1-50");
         }
       }
-      const result = roomsService.createRoom(request.auth!.userId, request.auth!.deviceId, roomName, maxMembers);
+      const autoApprove = body.auto_approve !== undefined ? assertOneOf(body.auto_approve, [0, 1] as const, "auto_approve") : 1;
+      const result = roomsService.createRoom(request.auth!.userId, request.auth!.deviceId, roomName, maxMembers, autoApprove);
       return ok(result);
     }
   );
@@ -103,10 +105,32 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const room = roomsService.requireOwnerRoom(request.params.room_id, request.auth!.userId);
       const members = roomsService.getRoomMembers(room);
-      if (members.length === 0) {
-        return ok({ members: [], total: 0 }, MESSAGE[CODE.NO_DATA]);
+      const pending = roomsService.getPendingMembers(room);
+      if (members.length === 0 && pending.length === 0) {
+        return ok({ members: [], pending: [], total: 0 }, MESSAGE[CODE.NO_DATA]);
       }
-      return ok({ members, total: members.length });
+      return ok({ members, pending, total: members.length });
+    }
+  );
+
+  // approve_join — owner approves a member whose join request is pending
+  // (room was created with auto_approve=0).
+  app.post<{ Params: { room_id: string; member_id: string } }>(
+    "/rooms/:room_id/members/:member_id/approve",
+    { preHandler: authenticate },
+    async (request) => {
+      const room = roomsService.requireOwnerRoom(request.params.room_id, request.auth!.userId);
+      return ok(roomsService.approveMember(room, request.params.member_id));
+    }
+  );
+
+  // deny_join — owner rejects a pending join request (device gets leave_room).
+  app.post<{ Params: { room_id: string; member_id: string } }>(
+    "/rooms/:room_id/members/:member_id/deny",
+    { preHandler: authenticate },
+    async (request) => {
+      const room = roomsService.requireOwnerRoom(request.params.room_id, request.auth!.userId);
+      return ok(roomsService.denyMember(room, request.params.member_id));
     }
   );
 
