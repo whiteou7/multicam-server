@@ -35,7 +35,7 @@ export const deviceCommandsRepo = {
   listPendingForDevice(deviceId: string): DeviceCommandRow[] {
     return db
       .prepare<[string]>(
-        "SELECT * FROM device_commands WHERE device_id = ? AND acked_at IS NULL ORDER BY issued_at ASC"
+        "SELECT * FROM device_commands WHERE device_id = ? AND acked_at IS NULL ORDER BY issued_at ASC, id ASC"
       )
       .all(deviceId) as DeviceCommandRow[];
   },
@@ -43,12 +43,14 @@ export const deviceCommandsRepo = {
   // A client reports the last command_id it executed. Treat that and every
   // earlier not-yet-acked command for the same device as delivered, so a
   // dropped ack response doesn't leave stale commands piling up.
+  // Đúng thứ tự: ORDER BY issued_at ASC, id ASC -> ack theo thứ tự phát hành
   ackUpTo(deviceId: string, commandId: string): void {
     const command = this.findById(commandId);
     if (!command || command.device_id !== deviceId) return;
     db.prepare(
       `UPDATE device_commands SET acked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-       WHERE device_id = ? AND acked_at IS NULL AND issued_at <= ?`
-    ).run(deviceId, command.issued_at);
+       WHERE device_id = ? AND acked_at IS NULL
+         AND (issued_at < ? OR (issued_at = ? AND id <= ?))`
+    ).run(deviceId, command.issued_at, command.issued_at, command.id);
   },
 };
