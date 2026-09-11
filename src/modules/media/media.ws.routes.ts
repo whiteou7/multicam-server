@@ -12,6 +12,7 @@ import {
   sendToSocket,
 } from "./media.service";
 import { MemberMedia } from "./media.state";
+import { recorderService } from "./recorder";
 
 const CONTROLLER_PARTICIPANT_ID = "controller";
 
@@ -140,6 +141,10 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                 producer_id: producer.id,
                 kind: producer.kind,
               });
+              // Ghi lại broadcast ngay trên server (mỗi remote 1 file MP4 khi dừng phát)
+              recorderService
+                .start(app, roomMedia, room.id, participantId, producer)
+                .catch((err: unknown) => request.log.error({ err }, "recorder start failed"));
               break;
             }
 

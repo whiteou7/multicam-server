@@ -45,4 +45,15 @@ export const env = {
     listenIp: process.env.MEDIASOUP_LISTEN_IP ?? "0.0.0.0",
     announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || null,
   },
+
+  recording: {
+    // Bật ghi tự động khi phát sóng. Tắt bằng SERVER_RECORDING_ON=false.
+    on: (process.env.SERVER_RECORDING_ON ?? "true") === "true",
+    // Binary ffmpeg trên host. Windows: cài rồi để trong PATH (hoặc trỏ file ffmpeg.exe).
+    ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
+    tmpDir: process.env.RECORDINGS_TMP_DIR ?? "./data/recordings-tmp",
+    // Bật thì đẩy file MP4 lên MinIO + insert videos. Tắt (false) để debug:
+    // giữ nguyên file ở tmpDir, không upload — log đầy đủ thông tin file + stderr ffmpeg.
+    upload: (process.env.SERVER_RECORDING_UPLOAD ?? "true") === "true",
+  },
 };
