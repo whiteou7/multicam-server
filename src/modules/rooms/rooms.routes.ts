@@ -9,6 +9,8 @@ interface CreateRoomBody {
   room_name?: string;
   max_members?: number;
   auto_approve?: 0 | 1;
+  /** 1 = hiển thị phòng trên LAN (join không cần mã mời, xem GET /rooms/discover) */
+  open_for_join?: 0 | 1;
 }
 
 interface JoinRoomBody {
@@ -72,10 +74,18 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
         }
       }
       const autoApprove = body.auto_approve !== undefined ? assertOneOf(body.auto_approve, [0, 1] as const, "auto_approve") : 1;
-      const result = roomsService.createRoom(request.auth!.userId, request.auth!.deviceId, roomName, maxMembers, autoApprove);
+      const openForJoin = body.open_for_join !== undefined ? assertOneOf(body.open_for_join, [0, 1] as const, "open_for_join") : 0;
+      const result = roomsService.createRoom(request.auth!.userId, request.auth!.deviceId, roomName, maxMembers, autoApprove, openForJoin);
       return ok(result);
     }
   );
+
+  // Public (không cần auth): danh sách phòng đang "mở trên LAN" — app dùng sau
+  // khi server được /health xác minh để phone bấm vào phòng thay vì gõ mã mời.
+  app.get("/rooms/discover", async () => {
+    const rooms = roomsService.discoverableRooms();
+    return ok(rooms.length ? rooms : []);
+  });
 
   // join_room — spec § 2.3/2.8.2. grant_control must be exactly `true`; a
   // Remote always has the right to revoke it afterwards via set_member_permission.
@@ -84,7 +94,8 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: authenticate },
     async (request) => {
       const body = request.body ?? ({} as JoinRoomBody);
-      const inviteCode = assertString(requireField(body.invite_code, "invite_code"), "invite_code");
+      // invite_code có thể bỏ trống — service sẽ tự chọn phòng đang "mở trên LAN"
+      const inviteCode = body.invite_code ? assertString(body.invite_code, "invite_code") : "";
       const deviceId = assertString(requireField(body.device_id, "device_id"), "device_id");
       const cameraName = assertString(requireField(body.camera_name, "camera_name"), "camera_name");
       const grantControl = requireField(body.grant_control, "grant_control");
@@ -170,7 +181,17 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: authenticate },
     async (request) => {
       const room = roomsService.requireOwnerRoom(request.params.room_id, request.auth!.userId);
-      return ok(roomsService.closeRoom(room));
+      return ok(roomsService.deleteRoomHard(room));
+    }
+  );
+
+  // Phòng "của tôi" (controller) — danh sách để quản lý CRUD phía controller:
+  // xem mã mời, mở trên LAN, xóa phòng cũ. Owner-only.
+  app.get(
+    "/rooms/mine",
+    { preHandler: [authenticate, requireRole("controller")] },
+    async (request) => {
+      return ok({ rooms: roomsService.listOwnedRooms(request.auth!.userId) });
     }
   );
 

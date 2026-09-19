@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./index";
 import { usersRepo } from "./repositories/users.repo";
+import { devicesRepo } from "./repositories/devices.repo";
 import { hashPassword } from "../utils/password";
+import { env } from "../config/env";
 
 // Default demo accounts for the 15/8 milestone: 1 Controller (issuer-provided) + 3 Remote.
 const SEED_ACCOUNTS: Array<{
@@ -66,6 +68,42 @@ export function seedDefaultAccounts(): void {
     }
   });
   insertIfMissing();
+  ensureDefaultRoomOwner();
+}
+
+/** Device id cố định của owner "phòng chung" — phòng trỏ owner_device_id vào đây. */
+const DEFAULT_ROOM_OWNER_DEVICE_ID = "default-room-device";
+
+/**
+ * Owner hệ thống nắm giữ phòng chung (tự tạo khi server khởi động). Tài khoản này
+ * không dành cho thao tác hằng ngày — chỉ để phòng có owner hợp lệ.
+ */
+function ensureDefaultRoomOwner(): void {
+  if (!env.rooms.defaultRoomEnabled) return;
+  const { defaultOwnerEmail, defaultOwnerPassword } = env.rooms;
+  let owner = usersRepo.findByEmailOrPhone(defaultOwnerEmail);
+  if (!owner) {
+    usersRepo.insert({
+      id: randomUUID(),
+      first_name: "Default",
+      last_name: "Room",
+      email: defaultOwnerEmail,
+      phone: null,
+      password_hash: hashPassword(defaultOwnerPassword),
+      account_role: "controller",
+      avatar: null,
+      storage_quota: 10 * 1024 * 1024 * 1024,
+      is_seed_account: 1,
+    });
+    owner = usersRepo.findByEmailOrPhone(defaultOwnerEmail)!;
+  }
+  devicesRepo.upsert({
+    id: DEFAULT_ROOM_OWNER_DEVICE_ID,
+    user_id: owner.id,
+    device_type: 1,
+    device_name: "Server",
+  });
+  devicesRepo.setConfig(DEFAULT_ROOM_OWNER_DEVICE_ID, { remote_control_enabled: 1 });
 }
 
 if (require.main === module) {

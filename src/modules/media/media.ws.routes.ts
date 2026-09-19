@@ -47,8 +47,13 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
       let role: Role;
       let participantId: string;
 
-      // Controller chỉ cần userId khớp owner_id (không bắt deviceId, vì cùng user có thể có nhiều device web/app)
-      if (auth.userId === room.owner_id) {
+      // Role quyết định theo account, không theo quyền sở hữu phòng: account
+      // controller luôn mở được recv transport (preview/xem) bất kỳ phòng nào,
+      // tài khoản remote chỉ mở được send transport (phát). Trước đây dựa vào
+      // owner_id khiến dashboard/login bằng controller@ mà join phòng của user
+      // khác (vd phòng chung của default-room@) bị coi là remote → báo lỗi
+      // "a remote may only open a send transport".
+      if (auth.accountRole === "controller") {
         role = "controller";
         participantId = CONTROLLER_PARTICIPANT_ID;
       } else {
@@ -181,6 +186,16 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               const consumer = member.consumers.get(msg.consumer_id);
               if (!consumer) throw new Error("unknown consumer_id");
               await consumer.resume();
+              // Preview sẽ "đen" tới khi có keyframe đầu; producer chỉ bơm keyframe
+              // khi được yêu cầu (đa số là delta frames). Request ngay lúc resume.
+              if (consumer.kind === "video") {
+                void consumer.requestKeyFrame().catch(() => undefined);
+                setTimeout(() => {
+                  if (consumer.kind === "video" && !consumer.closed) {
+                    void consumer.requestKeyFrame().catch(() => undefined);
+                  }
+                }, 300);
+              }
               send(socket, { type: "consumer-resumed", request_id: msg.request_id ?? null, consumer_id: consumer.id });
               break;
             }

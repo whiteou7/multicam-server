@@ -13,7 +13,7 @@ const INVITE_CODE_TTL_MS = 10 * 60 * 1000; // 10 min
 const PREVIEW_TOKEN_TTL_SECONDS = 300; // 5 min
 const DEFAULT_ZOOM_RANGE = { min: 0.5, max: 10.0 };
 
-function generateInviteCode(): string {
+export function generateInviteCode(): string {
   let code = "";
   for (let i = 0; i < 6; i++) {
     code += INVITE_CODE_CHARSET[Math.floor(Math.random() * INVITE_CODE_CHARSET.length)];
@@ -58,7 +58,8 @@ export function createRoom(
   ownerDeviceId: string,
   roomName: string | null,
   maxMembers: number,
-  autoApprove = 1
+  autoApprove = 1,
+  openForJoin = 0
 ) {
   const device = devicesRepo.findById(ownerDeviceId);
   if (!device || device.user_id !== ownerUserId) {
@@ -70,11 +71,19 @@ export function createRoom(
 
   const existing = roomsRepo.findOpenByOwner(ownerUserId);
   if (existing) {
+    if (existing.open_for_join !== openForJoin) {
+      roomsRepo.setOpenForJoin(existing.id, openForJoin);
+      roomsRepo.bumpRevision(existing.id);
+      existing.open_for_join = openForJoin;
+    }
+    ensureOwnerMember(existing, ownerUserId, ownerDeviceId);
+    consolidateOwnedRooms(ownerUserId, existing.id);
     return {
       room_id: existing.id,
       invite_code: existing.invite_code,
       expires_at: existing.invite_code_expires_at,
       owner_device_id: existing.owner_device_id,
+      open_for_join: existing.open_for_join,
       created_at: existing.created_at,
     };
   }
@@ -91,15 +100,108 @@ export function createRoom(
     invite_code_expires_at: expiresAt,
     max_members: maxMembers,
     auto_approve: autoApprove,
+    open_for_join: openForJoin,
   });
   const room = roomsRepo.findById(id)!;
+  ensureOwnerMember(room, ownerUserId, ownerDeviceId);
+  consolidateOwnedRooms(ownerUserId, room.id);
   return {
     room_id: room.id,
     invite_code: room.invite_code,
     expires_at: room.invite_code_expires_at,
     owner_device_id: room.owner_device_id,
+    open_for_join: room.open_for_join,
     created_at: room.created_at,
   };
+}
+
+/**
+ * Controller chỉ nên có MỘT phòng duy nhất để không mọc ra loạt phòng cũ lộn xộn
+ * trên LAN. Khi tạo/dùng lại phòng, xóa hẳn (hard-delete) mọi phòng khác của user:
+ * - các phòng OWNED đang mở khác (remote kẹt ở đó sẽ tự thoát membership),
+ * - các phòng kín/đã đóng cũ không còn dùng (dọn sạch hàng rác tích lũy).
+ */
+function consolidateOwnedRooms(ownerUserId: string, keepRoomId: string): void {
+  for (const owned of roomsRepo.listOwned(ownerUserId)) {
+    if (owned.id === keepRoomId) continue;
+    try {
+      closeRoomMedia(owned.id);
+    } catch {
+      /* room media có thể chưa tồn tại */
+    }
+    roomsRepo.deleteRoom(owned.id);
+  }
+}
+
+export function listOwnedRooms(userId: string) {
+  return roomsRepo.listOwned(userId).map((room) => {
+    const active = roomMembersRepo.listAllByRoom(room.id).filter((m) => !m.left_at);
+    return {
+      room_id: room.id,
+      room_name: room.room_name,
+      invite_code: room.invite_code,
+      open_for_join: room.open_for_join,
+      auto_approve: room.auto_approve,
+      status: room.status,
+      member_count: active.filter((m) => m.join_status === "approved").length,
+      max_members: room.max_members,
+      created_at: room.created_at,
+    };
+  });
+}
+
+/** Xóa hẳn phòng (owner): đóng media trước, rồi hard-delete (FK cascade dọn members). */
+export function deleteRoomHard(room: RoomRow): void {
+  try {
+    closeRoomMedia(room.id);
+  } catch {
+    /* chưa có media */
+  }
+  roomsRepo.deleteRoom(room.id);
+}
+
+/**
+ * Chủ phòng (controller) luôn là thành viên chính phòng của mình: bấm "Rời phòng"
+ * ở app/dashboard controller sẽ hoạt động (trước đây owner không phải member nên
+ * leave bị NOT_ACCESS "không được rời phòng"). Nếu device chủ đang kẹt ở phòng
+ * khác thì tự rời phòng đó để vào phòng mình vừa tạo.
+ */
+function ensureOwnerMember(room: RoomRow, ownerUserId: string, ownerDeviceId: string): void {
+  const existing = roomMembersRepo.findActiveByDevice(ownerDeviceId);
+  if (existing && existing.room_id === room.id) return;
+  if (existing) {
+    const rev = roomsRepo.bumpRevision(existing.room_id);
+    roomMembersRepo.setLeft(existing.id, rev);
+    closeMemberMedia(existing.room_id, existing.id);
+  }
+  if (roomMembersRepo.findActiveByRoomAndDevice(room.id, ownerDeviceId)) return;
+  const revision = roomsRepo.bumpRevision(room.id);
+  const ownerDevice = devicesRepo.findById(ownerDeviceId);
+  roomMembersRepo.insert({
+    id: randomUUID(),
+    room_id: room.id,
+    device_id: ownerDeviceId,
+    user_id: ownerUserId,
+    camera_name: ownerDevice?.camera_name ?? `Controller-${ownerDeviceId.slice(0, 4)}`,
+    joined_revision: revision,
+    join_status: "approved",
+  });
+}
+
+/** Danh sách phòng đang "mở trên LAN" cho bất kỳ ai trong cùng subnet join (không cần mã). */
+export function discoverableRooms() {
+  return roomsRepo.listOpenRooms().map((room) => {
+    const active = roomMembersRepo.listAllByRoom(room.id).filter((m) => !m.left_at);
+    return {
+      room_id: room.id,
+      room_name: room.room_name,
+      invite_code: room.invite_code,
+      auto_approve: room.auto_approve,
+      member_count: active.filter((m) => m.join_status === "approved").length,
+      pending_count: active.filter((m) => m.join_status === "pending").length,
+      max_members: room.max_members,
+    };
+  });
 }
 
 export function joinRoom(
@@ -113,11 +215,32 @@ export function joinRoom(
     throw new ApiError(CODE.NOT_EXISTED);
   }
 
-  const room = roomsRepo.findOpenByInviteCode(inviteCode);
-  if (!room || new Date(room.invite_code_expires_at).getTime() < Date.now()) {
+  let room = roomsRepo.findOpenByInviteCode(inviteCode);
+  // Chế độ LAN: app gửi mã mời từ discovery payload. Nếu để trống mã mà có phòng
+  // đang mở trên LAN (open_for_join=1) thì tự chọn phòng mở đó.
+  if (!room && !inviteCode) {
+    room = roomsRepo.listOpenRooms()[0];
+  }
+  if (!room || (room.open_for_join !== 1 && new Date(room.invite_code_expires_at).getTime() < Date.now())) {
     throw new ApiError(CODE.NOT_EXISTED, "Mã mời không tồn tại hoặc đã hết hạn");
   }
-  if (roomMembersRepo.findActiveByDevice(deviceId)) {
+  const existingMember = roomMembersRepo.findActiveByDevice(deviceId);
+  if (existingMember) {
+    // Idempotent: device đã ở CHÍNH phòng này (vd tự join lại khi mở lại app) thì
+    // xem như đã join — không báo lỗi. Chỉ báo 409 khi device đang ở phòng KHÁC.
+    if (existingMember.room_id === room.id) {
+      const ownerDevice = devicesRepo.findById(room.owner_device_id);
+      const members = roomMembersRepo.listActiveByRoom(room.id).map(memberPublicShape);
+      return {
+        room_id: room.id,
+        room_name: room.room_name,
+        owner: { device_id: room.owner_device_id, camera_name: ownerDevice?.camera_name ?? null },
+        member_id: existingMember.id,
+        member_join_status: existingMember.join_status,
+        members,
+        already_in_room: true,
+      };
+    }
     throw new ApiError(CODE.ALREADY_DONE, "Thiết bị đã ở trong một phòng khác");
   }
   const activeMembers = roomMembersRepo.listAllByRoom(room.id).filter((m) => !m.left_at);

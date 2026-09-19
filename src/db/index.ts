@@ -45,6 +45,11 @@ const LATE_COLUMN_MIGRATIONS: Array<{ table: string; name: string; ddl: string }
     name: "join_status",
     ddl: "ALTER TABLE room_members ADD COLUMN join_status TEXT NOT NULL DEFAULT 'approved'",
   },
+  {
+    table: "rooms",
+    name: "open_for_join",
+    ddl: "ALTER TABLE rooms ADD COLUMN open_for_join INTEGER NOT NULL DEFAULT 0",
+  },
 ];
 for (const migration of LATE_COLUMN_MIGRATIONS) {
   const cols = new Set(

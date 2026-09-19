@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS rooms (
   max_members INTEGER NOT NULL DEFAULT 8,
   -- 1 = auto-approve join (default), 0 = owner must approve each joiner
   auto_approve INTEGER NOT NULL DEFAULT 1,
+  -- 1 = phòng mở "tìm thấy trên LAN" (không cần nhập mã, được quảng bá qua
+  -- mDNS/UDP discovery); 0 = phòng mặc định, chỉ join bằng mã mời.
+  open_for_join INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'open', -- open | closed
   session_id TEXT, -- current active recording_sessions.id, if recording
   revision INTEGER NOT NULL DEFAULT 0,

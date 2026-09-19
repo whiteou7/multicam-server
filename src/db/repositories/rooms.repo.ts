@@ -9,6 +9,7 @@ export interface RoomRow {
   invite_code_expires_at: string;
   max_members: number;
   auto_approve: number;
+  open_for_join: number;
   status: "open" | "closed";
   session_id: string | null;
   revision: number;
@@ -26,11 +27,16 @@ export const roomsRepo = {
     invite_code_expires_at: string;
     max_members: number;
     auto_approve?: number;
+    open_for_join?: number;
   }): void {
     db.prepare(
-      `INSERT INTO rooms (id, owner_id, owner_device_id, room_name, invite_code, invite_code_expires_at, max_members, auto_approve)
-       VALUES (@id, @owner_id, @owner_device_id, @room_name, @invite_code, @invite_code_expires_at, @max_members, @auto_approve)`
-    ).run({ ...room, auto_approve: room.auto_approve ?? 1 });
+      `INSERT INTO rooms (id, owner_id, owner_device_id, room_name, invite_code, invite_code_expires_at, max_members, auto_approve, open_for_join)
+       VALUES (@id, @owner_id, @owner_device_id, @room_name, @invite_code, @invite_code_expires_at, @max_members, @auto_approve, @open_for_join)`
+    ).run({
+      ...room,
+      auto_approve: room.auto_approve ?? 1,
+      open_for_join: room.open_for_join ?? 0,
+    });
   },
 
   findById(id: string): RoomRow | undefined {
@@ -47,6 +53,33 @@ export const roomsRepo = {
     return db
       .prepare<[string]>("SELECT * FROM rooms WHERE invite_code = ? AND status = 'open' LIMIT 1")
       .get(code) as RoomRow | undefined;
+  },
+
+  /** Phòng đang mở và được đánh dấu "tìm thấy trên LAN" (join không cần mã mời). */
+  listOpenRooms(): RoomRow[] {
+    return db
+      .prepare(
+        "SELECT * FROM rooms WHERE status = 'open' AND open_for_join = 1 ORDER BY created_at DESC LIMIT 20"
+      )
+      .all() as RoomRow[];
+  },
+
+  setOpenForJoin(id: string, open: number): void {
+    db.prepare("UPDATE rooms SET open_for_join = ? WHERE id = ?").run(open, id);
+  },
+
+  /** Toàn bộ phòng của một user (mở + đã đóng), mới nhất trước. */
+  listOwned(ownerId: string): RoomRow[] {
+    return db
+      .prepare<[string]>(
+        "SELECT * FROM rooms WHERE owner_id = ? ORDER BY (status = 'open') DESC, created_at DESC"
+      )
+      .all(ownerId) as RoomRow[];
+  },
+
+  /** Xóa hẳn phòng (FK ON DELETE CASCADE dọn room_members/device_commands/recording_sessions). */
+  deleteRoom(id: string): void {
+    db.prepare("DELETE FROM rooms WHERE id = ?").run(id);
   },
 
   bumpRevision(id: string): number {

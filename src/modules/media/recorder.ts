@@ -38,6 +38,11 @@ interface StreamRec {
   /** Cổng UDP mà ffmpeg sẽ bind để nhận RTP (đã pass vào transport.connect) */
   rtpPort: number;
   closed: boolean;
+  /** packetCount video gần nhất (từ consumer.getStats) — để detect nguồn ngừng gửi */
+  lastPktCount: number;
+  /** số tick liên tiếp không nhận packet mới (tick = 2s) */
+  stallTicks: number;
+  stallLogged: boolean;
 }
 
 interface MemberRecorder {
@@ -49,6 +54,8 @@ interface MemberRecorder {
   startedAt: number;
   startTimer: NodeJS.Timeout | null;
   stopping: boolean;
+  /** Pump PLI định kỳ (2s) — giữ keyframe tới mọi consumer (controller, ffmpeg) */
+  keyframeTimer: NodeJS.Timeout | null;
   /** 60 dòng cuối stderr của ffmpeg — để debug khi file ra bị rỗng/khó hiểu */
   stderrTail: string[];
 }
@@ -111,6 +118,35 @@ function buildSdp(streams: StreamRec[]): string {
   return header + "\n" + blocks.join("\n") + "\n";
 }
 
+/**
+ * Watchdog timeout cho upload MinIO. minio-js KHÔNG đặt socket timeout
+ * (http.request không có `timeout`) nên một part kẹt trên mạng có thể treo
+ * `fPutObject` vĩnh viễn. Với timeout này ta KHÔNG hủy request đang chạy
+ * (nó vẫn hoàn tất nền nếu mạng hồi phục) mà chỉ thôi chờ đợi, để luồng
+ * dừng phát không bao giờ bị block vô hạn.
+ */
+function withTimeout<T>(
+  p: Promise<T>,
+  ms: number
+): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(
+      () => resolve({ ok: false, error: new Error(`upload stalled after ${ms}ms`) }),
+      ms
+    );
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ ok: true, value });
+      },
+      (error) => {
+        clearTimeout(timer);
+        resolve({ ok: false, error });
+      }
+    );
+  });
+}
+
 class RecorderService {
   private readonly map = new Map<string, Map<string, MemberRecorder>>(); // roomId -> (memberId -> recorder)
   private loggedArmed = false;
@@ -156,6 +192,7 @@ class RecorderService {
         startedAt: Date.now(),
         startTimer: null,
         stopping: false,
+        keyframeTimer: null,
         stderrTail: [],
       };
       roomRecorders.set(memberId, rec);
@@ -186,6 +223,16 @@ class RecorderService {
           // giữa GOP sẽ decode trễ; hơn nữa muxer mp4 cần keyframe đầu. Gọi 2 lần.
           void this.requestKeyframe(s.consumer);
         }
+        // Keyframe pump 2s: producer chỉ gửi keyframe khi được yêu cầu (PC từng
+        // consume chỉ còn delta frame) → controller/preview sẽ "đen" tới khi
+        // có keyframe. Pump định kỳ giữ mọi consumer nhận keyframe ổn định.
+        rec!.keyframeTimer = setInterval(() => {
+          for (const s of rec!.streams) {
+            if (s.closed || s.kind !== "video") continue;
+            void this.requestKeyframe(s.consumer);
+            void this.monitorFlow(app, rec!, s);
+          }
+        }, 2000);
       }, 1200);
     }
   }
@@ -198,6 +245,43 @@ class RecorderService {
       if (!consumer.closed) await consumer.requestKeyFrame();
     } catch {
       /* producer có thể không hỗ trợ PLI — bỏ qua */
+    }
+  }
+
+  /** Đếm packet video qua consumer.getStats: phát hiện producer ngừng gửi hàng loạt.
+   *  tick = 2s; >=3 tick (6s) không có packet mới → cảnh báo + log lúc nối lại.
+   *  Giúp phân biệt "nguồn ngừng 20s" (màn hình tối/background) với "thiếu keyframe". */
+  private async monitorFlow(
+    app: FastifyInstance,
+    rec: MemberRecorder,
+    stream: StreamRec
+  ): Promise<void> {
+    try {
+      const stats = await stream.consumer.getStats();
+      const item = stats.find(
+        (x) => (x as { rtpStream?: { packetCount?: number } }).rtpStream?.packetCount != null
+      );
+      const pkt = (item as { rtpStream?: { packetCount?: number } } | undefined)
+        ?.rtpStream?.packetCount ?? -1;
+      if (pkt < 0) return;
+      if (pkt === stream.lastPktCount) {
+        stream.stallTicks += 1;
+      } else {
+        stream.lastPktCount = pkt;
+        stream.stallTicks = 0;
+      }
+      if (stream.stallTicks >= 3 && !stream.stallLogged) {
+        stream.stallLogged = true;
+        app.log.warn(
+          { roomId: rec.memberId, memberId: rec.memberId, stallSeconds: stream.stallTicks * 2 },
+          "OBS: video producer tạm ngừng gửi packets (nguồn/theo dõi liên tục)"
+        );
+      } else if (stream.stallLogged && stream.stallTicks < 3) {
+        stream.stallLogged = false;
+        app.log.warn({ memberId: rec.memberId }, "OBS: video producer nối lại (sau ~[stopped]s)");
+      }
+    } catch {
+      /* getStats không sẵn sàng — bỏ qua tick này */
     }
   }
 
@@ -232,6 +316,9 @@ class RecorderService {
         transport,
         rtpPort,
         closed: false,
+        lastPktCount: -1,
+        stallTicks: 0,
+        stallLogged: false,
       };
 
       const onClosed = () => {
@@ -330,6 +417,10 @@ class RecorderService {
       clearTimeout(rec.startTimer);
       rec.startTimer = null;
     }
+    if (rec.keyframeTimer) {
+      clearInterval(rec.keyframeTimer);
+      rec.keyframeTimer = null;
+    }
 
     try {
       await this.gracefulFfmpegStop(rec);
@@ -355,11 +446,14 @@ class RecorderService {
     if (!rec.ffmpeg) return;
     const proc = rec.ffmpeg;
     await new Promise<void>((resolve) => {
+      // Cho ffmpeg tới 15s để flush hết backlog (video dài/encoder bị nghẽn tích
+      // GOP lớn) trước khi terminate cứng — 3s cũ quá ngắn, giết giữa flush làm
+      // hỏng fragment cuối, file lên MinIO phát tới đuôi bị đứng hình/cắt.
       const hardKill = setTimeout(() => {
         try {
           proc.kill(); // Windows: TerminateProcess — an toàn nhờ frag mp4
         } catch {}
-      }, 3000);
+      }, 15000);
       proc.once("exit", () => {
         clearTimeout(hardKill);
         resolve();
@@ -425,24 +519,75 @@ class RecorderService {
     const videoId = randomUUID();
     const objectKey = `recordings/${room.owner_id}/${member.device_id}/${videoId}.mp4`;
 
-    await app.minio.fPutObject(env.minio.bucket, objectKey, rec.outFile, {
-      "Content-Type": "video/mp4",
-    });
+    // Upload NỀN — không chặn luồng dừng phát. `uploadAndIndex` tự có watchdog
+    // timeout + retry cho từng lần fPutObject, nên không bao giờ treo vĩnh viễn.
+    void this.uploadAndIndex(app, roomId, rec, videoId, objectKey, {
+      ownerId: room.owner_id,
+      deviceId: member.device_id,
+      cameraName: member.camera_name ?? `Remote-${member.device_id.slice(0, 4)}`,
+      durationMs: Math.max(500, Date.now() - rec.startedAt),
+      sizeBytes: st.size,
+    }).catch((e) =>
+      app.log.error({ err: e, roomId, memberId: rec.memberId }, "background upload crashed")
+    );
+  }
 
-    const durationMs = Math.max(500, Date.now() - rec.startedAt);
+  /**
+   * Đẩy file MP4 lên MinIO (watchdog 90s/lần + retry 3 lần), chỉ khi thành công
+   * mới insert vào bảng videos rồi xoá file tạm. Thất bại sau tất cả lượt:
+   * giữ nguyên file ở tmpDir để cứu thủ công, KHÔNG insert videos.
+   */
+  private async uploadAndIndex(
+    app: FastifyInstance,
+    roomId: string,
+    rec: MemberRecorder,
+    videoId: string,
+    objectKey: string,
+    meta: { ownerId: string; deviceId: string; cameraName: string; durationMs: number; sizeBytes: number }
+  ): Promise<void> {
+    const { memberId } = rec;
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const res = await withTimeout(
+        app.minio.fPutObject(env.minio.bucket, objectKey, rec.outFile, {
+          "Content-Type": "video/mp4",
+        }),
+        90_000
+      );
+      if (res.ok) {
+        lastErr = null;
+        break;
+      }
+      lastErr = res.error;
+      app.log.error(
+        { roomId, memberId, objectKey, attempt, size: meta.sizeBytes, err: lastErr },
+        "minio fPutObject failed/stalled — retrying"
+      );
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    if (lastErr) {
+      app.log.error(
+        { roomId, memberId, objectKey, outFile: rec.outFile, size: meta.sizeBytes, err: lastErr },
+        "minio upload FAILED after 3 attempts — file kept, videos row NOT inserted"
+      );
+      await fsp.rm(rec.sdpFile, { force: true }).catch(() => undefined);
+      return;
+    }
+
     videosRepo.insert({
       id: videoId,
-      owner_id: room.owner_id,
-      device_id: member.device_id,
+      owner_id: meta.ownerId,
+      device_id: meta.deviceId,
       session_id: null,
       local_video_uid: `server-recorder-${roomId.slice(0, 8)}-${rec.startedAt}`,
-      camera_name: member.camera_name ?? `Remote-${member.device_id.slice(0, 4)}`,
+      camera_name: meta.cameraName,
       name: `Broadcast ${new Date(rec.startedAt).toISOString()}`,
       description: "Ghi tự động trên server khi phát sóng",
       object_key: objectKey,
       thumbnail_key: null,
-      duration_ms: durationMs,
-      size_bytes: st.size,
+      duration_ms: meta.durationMs,
+      size_bytes: meta.sizeBytes,
       resolution: null,
       fps: null,
       codec: "opus/vp8-h264",
@@ -451,7 +596,7 @@ class RecorderService {
     });
 
     app.log.info(
-      { roomId, memberId: rec.memberId, videoId, size: st.size, durationMs },
+      { roomId, memberId, videoId, objectKey, size: meta.sizeBytes, durationMs: meta.durationMs },
       "broadcast recording saved to MinIO"
     );
 

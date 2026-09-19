@@ -64,4 +64,16 @@ export const env = {
     serverName: process.env.SERVER_NAME ?? os.hostname(),
     udpPort: Number(process.env.DISCOVER_UDP_PORT ?? 55666),
   },
+
+  rooms: {
+    // "Phòng chung" tự tạo khi server khởi động (không giới hạn thời gian, mở trên LAN).
+    // Phone quét mạng → thấy phòng này trong /rooms/discover → chọn và join không cần mã.
+    defaultRoomEnabled: (process.env.DEFAULT_ROOM_ENABLED ?? "true") === "true",
+    defaultRoomName: process.env.DEFAULT_ROOM_NAME ?? "Phòng chung (LAN)",
+    defaultRoomMaxMembers: Number(process.env.DEFAULT_ROOM_MAX_MEMBERS ?? 50),
+    defaultRoomAutoApprove: (process.env.DEFAULT_ROOM_AUTO_APPROVE ?? "true") === "true",
+    // Owner hệ thống nắm giữ phòng chung (seed tự tạo nếu chưa tồn tại).
+    defaultOwnerEmail: process.env.DEFAULT_ROOM_OWNER_EMAIL ?? "default-room@multicam.local",
+    defaultOwnerPassword: process.env.DEFAULT_ROOM_OWNER_PASSWORD ?? "DefaultRoom@123",
+  },
 };
