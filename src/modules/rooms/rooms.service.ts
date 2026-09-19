@@ -467,9 +467,25 @@ export async function getPreviewToken(app: FastifyInstance, room: RoomRow) {
 
 function resolveTargetMembers(room: RoomRow, target: "all" | string[]): RoomMemberRow[] {
   const active = roomMembersRepo.listActiveByRoom(room.id);
-  if (target === "all") return active;
+  // Chỉ điều khiển phone Remote thật: loại bỏ thiết bị thuộc chính Controller (owner)
+  // vd dashboard web / controller phone — kẻo "Ghi ALL" bắn cả máy chủ điều khiển.
+  const ownerDevices = new Set<string>();
+  for (const m of active) if (m.user_id === room.owner_id) ownerDevices.add(m.device_id);
+  const byDevice = new Map<string, RoomMemberRow>();
+  for (const m of active) {
+    if (ownerDevices.has(m.device_id)) continue;
+    const prev = byDevice.get(m.device_id);
+    // Cùng 1 device mà join lại nhiều lần tạo nhiều member → giữ bản online + có quyền điều khiển
+    const better =
+      !prev ||
+      (!prev.is_online && m.is_online) ||
+      (prev.is_online === m.is_online && !prev.has_granted_control && m.has_granted_control);
+    if (better) byDevice.set(m.device_id, m);
+  }
+  const members = [...byDevice.values()];
+  if (target === "all") return members;
   const ids = new Set(target);
-  return active.filter((m) => ids.has(m.id));
+  return members.filter((m) => ids.has(m.id));
 }
 
 export function startRecording(
@@ -478,9 +494,7 @@ export function startRecording(
   config: Record<string, unknown>,
   clientCommandId: string
 ) {
-  if (recordingSessionsRepo.findActiveByRoom(room.id)) {
-    throw new ApiError(CODE.ALREADY_DONE, "Đang quay rồi");
-  }
+  const existing = recordingSessionsRepo.findActiveByRoom(room.id);
 
   const candidates = resolveTargetMembers(room, target);
   const accepted: RoomMemberRow[] = [];
@@ -494,13 +508,17 @@ export function startRecording(
       accepted.push(member);
     }
   }
-  if (accepted.length === 0) {
+  if (accepted.length === 0 && !existing) {
     throw new ApiError(CODE.COULD_NOT_COMPLETE, "Không có máy nào online để bắt đầu quay");
   }
 
-  const sessionId = randomUUID();
-  recordingSessionsRepo.insert({ id: sessionId, room_id: room.id, config_json: JSON.stringify(config) });
-  roomsRepo.setSessionId(room.id, sessionId);
+  // Phiên đang chạy: KHÔNG báo "Đang quay rồi" — tái gửi lệnh start_record cho các máy
+  // hiện đang online (kể cả máy join muộn), để bấm lại "Ghi ALL" luôn có tín hiệu thật.
+  let sessionId = existing?.id ?? randomUUID();
+  if (!existing) {
+    recordingSessionsRepo.insert({ id: sessionId, room_id: room.id, config_json: JSON.stringify(config) });
+    roomsRepo.setSessionId(room.id, sessionId);
+  }
 
   for (const member of accepted) {
     deviceCommandsRepo.insert({
@@ -520,6 +538,7 @@ export function startRecording(
     session_id: sessionId,
     started_at: session.started_at,
     command_id: clientCommandId,
+    already_active: !!existing,
     targets: accepted.map((m) => m.id),
     rejected,
   };

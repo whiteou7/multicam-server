@@ -171,6 +171,13 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                 member.consumers.delete(consumer.id);
                 send(socket, { type: "producer-closed", producer_id: msg.producer_id });
               });
+              // Xin keyframe ĐÚNG thời điểm RTP thực sự chảy (DTLS connected) — nếu xin khi
+              // resume-consumer quá sớm, keyframe rơi trước khi media được truyền → màn đen.
+              transport.on("dtlsstatechange", (state: string) => {
+                if (state === "connected" && consumer.kind === "video" && !consumer.closed) {
+                  void consumer.requestKeyFrame().catch(() => undefined);
+                }
+              });
               send(socket, {
                 type: "consumed",
                 request_id: msg.request_id ?? null,
@@ -187,14 +194,16 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               if (!consumer) throw new Error("unknown consumer_id");
               await consumer.resume();
               // Preview sẽ "đen" tới khi có keyframe đầu; producer chỉ bơm keyframe
-              // khi được yêu cầu (đa số là delta frames). Request ngay lúc resume.
+              // khi được yêu cầu (đa số là delta frames). Burst nhiều lần cách quãng
+              // để tránh rơi vào lúc SRTP/DTLS chưa sẵn sàng — kể cả trường hợp
+              // producer join sau khi transport đã connected từ lâu.
               if (consumer.kind === "video") {
-                void consumer.requestKeyFrame().catch(() => undefined);
-                setTimeout(() => {
-                  if (consumer.kind === "video" && !consumer.closed) {
-                    void consumer.requestKeyFrame().catch(() => undefined);
-                  }
-                }, 300);
+                const shots = [0, 400, 1200, 2000];
+                for (const delay of shots) {
+                  setTimeout(() => {
+                    if (!consumer.closed) void consumer.requestKeyFrame().catch(() => undefined);
+                  }, delay);
+                }
               }
               send(socket, { type: "consumer-resumed", request_id: msg.request_id ?? null, consumer_id: consumer.id });
               break;

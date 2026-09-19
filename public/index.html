@@ -129,10 +129,10 @@ video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;bo
       Controller: <b>recv</b> / Remote tự phát: sẽ tự `produce` nếu có camera. Trên web này bấm <b>Bật preview</b> để `consume`.
       <span class="small"> (cần `MEDIASOUP_ANNOUNCED_IP` nếu khác LAN)</span>
     </div>
-    <div style="margin-top:8px;display:flex;gap:8px">
-      <button id="btnPreview" class="success">Bật preview (recv)</button>
-      <button id="btnStopPreview" class="secondary">Ngắt</button>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+      <button id="btnPreview" class="success">▶ Bật preview (recv)</button>
       <button id="btnProduce" class="secondary">Phát camera (send)</button>
+      <span id="pvStatus" class="small"></span>
     </div>
     <div id="streams" class="streams" style="margin-top:12px"></div>
     <div id="mLog" class="log" style="margin-top:8px"></div>
@@ -262,8 +262,8 @@ async function ensureRoom(){
 $('#btnCreateRoom').onclick = async()=>{ try{ const r=await api('/rooms',{method:'POST',body:JSON.stringify({max_members:8,auto_approve:1,open_for_join:1})}); roomId=r.room_id; $('#roomId').textContent=roomId; $('#inviteCode').textContent=r.invite_code; apiLog('createRoom '+roomId+' '+r.invite_code); startRoomSync(); loadDiscover(); loadMyRooms(); }catch(e){ alert(e.message);} };
 $('#btnRefreshCode').onclick = async()=>{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/invite-code`,{method:'POST'}); $('#inviteCode').textContent=r.invite_code; };
 $('#btnCloseRoom').onclick = async()=>{ if(!(await ensureRoom())) return; await api(`/rooms/${roomId}`,{method:'DELETE'}); stopRoomSync(); roomId=null; $('#roomId').textContent=''; $('#inviteCode').textContent=''; loadDiscover(); loadMyRooms(); };
-$('#btnStartRec').onclick = async()=>{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/recording/start`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); apiLog('start '+JSON.stringify(r)); };
-$('#btnStopRec').onclick = async()=>{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/recording/stop`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); apiLog('stop '+JSON.stringify(r)); };
+$('#btnStartRec').onclick = async()=>{ try{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/recording/start`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); const rej=(r.rejected||[]).map(x=>x.member_id.slice(0,6)+':'+x.reason).join(', '); const t=(r.targets||[]).length; apiLog('start OK session='+(r.session_id||'').slice(0,8)+' targets='+t+(r.already_active?' (phiên đang chạy → tái gửi lệnh)':'')+(rej?' | bị loại: '+rej:'')); alert('Đã gửi lệnh bắt đầu ghi tới '+t+' máy'+(r.already_active?' — phiên đang chạy, lệnh được gửi lại':'')+(rej?'\nBị loại: '+rej:'')); }catch(e){ alert('Lỗi: '+(e?.message||String(e))+(e?.code?` [${e.code}]`:'')); } };
+$('#btnStopRec').onclick = async()=>{ try{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/recording/stop`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); const n=(r.results||[]).length; apiLog('stop OK session='+(r.session_id||'').slice(0,8)+' stoppers='+n); alert('Đã gửi lệnh dừng tới '+n+' máy — chờ phone finalize & upload vào Videos'); }catch(e){ alert('Lỗi: '+(e?.message||String(e))+(e?.code?` [${e.code}]`:'')); } };
 function startRoomSync(){ stopRoomSync(); let rev=0; async function tick(){ if(!roomId) return; try{ const d=await api(`/rooms/${roomId}/sync?since=${rev}`); rev=d.revision; $('#rev').textContent=rev; $('#nextSync').textContent=d.next_sync_in; $('#members').innerHTML = (d.members||[]).map(m=>`${m.camera_name} <span class="mono">${m.member_id.slice(0,6)}</span> online=${m.is_online} rec=${m.recording_state} <button onclick="setCam('${m.member_id}')">flash</button>`).join('<br>')||'no members'; }catch(e){ apiLog('syncRoom '+e.message);} syncTimer=setTimeout(tick, 4000); } tick(); }
 function stopRoomSync(){ if(syncTimer) clearTimeout(syncTimer); syncTimer=null; }
 window.setCam = async(mid)=>{ if(!roomId) return; await api(`/rooms/${roomId}/members/${mid}/camera`,{method:'PUT',body:JSON.stringify({flash_mode:'auto',zoom_factor:2.0,client_command_id:'cam_'+Date.now()})}); apiLog('setCamera '+mid); };
@@ -293,11 +293,31 @@ $('#btnProduce').onclick = async()=>{
   }catch(e){ const msg=e?.message||String(e); const code=e?.code?` [${e.code}]`:''; alert(msg+code); mLog('produce err '+msg+code); console.error(e); }
 };
 
+// ===== Preview recv — workflow 1 lần bấm (ON/OFF toggle, tự self-heal) =====
+let previewOn=false, previewPump=null, consumedPids=new Set();
+function setPreviewUI(){
+  const b=$('#btnPreview'); if(!b) return;
+  b.textContent = previewOn ? '■ Tắt preview' : '▶ Bật preview (recv)';
+  b.classList.toggle('success', !previewOn); b.classList.toggle('danger', previewOn);
+}
+function pvStatusTxt(){
+  const n=$('#streams').querySelectorAll('video').length;
+  const el=$('#pvStatus'); if(!el) return;
+  el.textContent = previewOn ? (n>0?`Đang xem ${n} luồng video`:'Đang chờ Remote phát sóng… video sẽ TỰ hiện') : '';
+}
+function clearPreviewInfra(){
+  if(previewPump){ clearInterval(previewPump); previewPump=null; }
+  try{ if(ws) ws.close(); }catch{} ws=null;
+  if(recvTr) try{ recvTr.close(); }catch{} recvTr=null;
+  device=null; consumers.clear(); consumedPids.clear();
+  $('#streams').innerHTML='';
+}
+function stopPreview(){ previewOn=false; clearPreviewInfra(); setPreviewUI(); mLog('đã tắt preview'); }
+
 async function startPreview(){
   // Dọn kết nối cũ trước — bấm lại preview không để lọt 2 WS
-  try{ if(ws) ws.close(); }catch{} ws=null;
-  if(recvTr) try{ recvTr.close(); }catch{} recvTr=null; device=null;
-  $('#streams').innerHTML=''; consumers.clear();
+  clearPreviewInfra();
+  previewOn=true; setPreviewUI();
   const tok = await api(`/rooms/${roomId}/preview-token`,{method:'POST',body:JSON.stringify({quality:'low',protocol:'webrtc'})});
   const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+cfg.host+':'+cfg.port+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
   mLog('preview: '+wsUrl);
@@ -315,41 +335,68 @@ async function startPreview(){
       recvTr.on('connect',async({dtlsParameters},cb,eb)=>{ try{ mLog('recv connect dtls'); await send({type:'connect-transport',transport_id:tr.transport_id,dtls_parameters:dtlsParameters}); mLog('recv connected'); cb();}catch(e){mLog('recv connect err '+e.message); eb(e);} });
       recvTr.on('connectionstatechange', s=> mLog('recv connectionstate '+s));
       const list=await send({type:'get-producers'}); mLog('get-producers count='+(list.producers?.length||0)); for(const p of (list.producers||[])) await doConsume(p);
-      if(!list.producers?.length) mLog('Chưa có producer — đang chờ Remote bắt đầu Phát sóng. Video sẽ TỰ hiện khi Remote phát, không cần bấm lại.');
+      pvStatusTxt();
     }
     if(m.type==='new-producer'){ mLog('new-producer kind='+m.kind+' id='+m.producer_id); await doConsume(m); }
-    if(m.type==='producer-closed'){ mLog('producer-closed '+m.producer_id); const el=document.getElementById('s_'+m.producer_id); if(el) el.remove(); }
+    if(m.type==='producer-closed'){ mLog('producer-closed '+m.producer_id); const el=document.getElementById('s_'+m.producer_id); if(el) el.remove(); pvStatusTxt(); }
   };
   async function doConsume(p){
-    if(!recvTr) return; if(document.getElementById('s_'+p.producer_id)) { mLog('skip duplicate '+p.producer_id); return; } mLog('doConsume '+p.producer_id+' kind='+p.kind); let r; try{ r=await send({type:'consume',transport_id:recvTr.id,producer_id:p.producer_id,rtp_capabilities:device.rtpCapabilities}); }catch(e){ mLog('consume send err '+ (e?.message||String(e))); return; }
+    if(!recvTr) return; if(consumedPids.has(p.producer_id)) { mLog('skip duplicate '+p.producer_id); return; } mLog('doConsume '+p.producer_id+' kind='+p.kind); let r; try{ r=await send({type:'consume',transport_id:recvTr.id,producer_id:p.producer_id,rtp_capabilities:device.rtpCapabilities}); }catch(e){ mLog('consume send err '+ (e?.message||String(e))); return; }
     let con; try{ con=await recvTr.consume({id:r.consumer_id, producerId:r.producer_id, kind:r.kind, rtpParameters:r.rtp_parameters}); }catch(e){ mLog('consume err '+ (e?.message||String(e))); return; }
+    consumedPids.add(p.producer_id);
     mLog('consumed '+con.id+' kind='+con.kind+' track muted='+con.track.muted+' enabled='+con.track.enabled+' readyState='+con.track.readyState);
     const stream=new MediaStream([con.track]); consumers.set(con.id,con);
     const box=document.createElement('div'); box.className='streamBox'; box.id='s_'+p.producer_id;
     box.innerHTML=`<div class="small">${p.member_id.slice(0,6)} • ${p.kind}</div>`;
     // dashboard chỉ xem video, bỏ nghe audio để đỡ vọng
-    if(con.kind==='audio'){ mLog('skip audio consume (dashboard muted) '+con.id); await send({type:'resume-consumer',consumer_id:con.id}); return; }
-    let el; el=document.createElement('video'); el.autoplay=true; el.playsInline=true; el.muted=true; el.srcObject=stream; el.style.width='100%'; el.style.height='auto'; el.onloadedmetadata=()=>{ mLog('video metadata '+el.videoWidth+'x'+el.videoHeight); el.play().catch(e=>mLog('play err '+e.message)); };
+    if(con.kind==='audio'){ mLog('audio consumed (muted, không hiển thị) '+con.id); try{ await send({type:'resume-consumer',consumer_id:con.id}); }catch(e){ mLog('resume audio err '+(e?.message||'')); } return; }
+    let el; el=document.createElement('video'); el.autoplay=true; el.playsInline=true; el.muted=true; el.srcObject=stream; el.style.width='100%'; el.style.height='auto'; el.onloadedmetadata=()=>{ mLog('video metadata '+el.videoWidth+'x'+el.videoHeight); el.play().catch(e=>mLog('play err '+e.message)); pvStatusTxt(); };
     box.appendChild(el); box.onclick=()=>{ if(document.fullscreenElement) document.exitFullscreen(); else box.requestFullscreen().catch(()=>{}); }; document.getElementById('streams').appendChild(box);
     con.track.onunmute=()=>{ mLog('track unmuted '+con.id+' kind='+con.kind); if(con.kind==='video' && el.videoWidth===0) el.play().catch(()=>{}); };
-    con.track.onmute=()=>mLog('track muted '+con.id);
-    con.track.onended=()=>mLog('track ended '+con.id);
     try{ await send({type:'resume-consumer',consumer_id:con.id}); mLog('resume-consumer sent '+con.id); }catch(e){ mLog('resume err '+(e?.message||String(e))); }
     setTimeout(()=>mLog('track after resume muted='+con.track.muted+' readyState='+con.track.readyState), 1500);
-    // giảm vọng: dashboard không phát lại mic, chỉ nghe
-    if(con.kind==='audio') { try{ con.track.enabled=true; }catch{} }
+    // Chống đen màn: producer chỉ gửi delta frame, keyframe dễ rơi trước khi DTLS/ICE xong.
+    // Vòng lặp 2s xin keyframe lại (qua resume-consumer) cho tới khi video có frame đầu tiên.
+    const kfTimer = setInterval(async ()=>{
+      if(!previewOn || !con || con.closed) { clearInterval(kfTimer); return; }
+      const vid=el.videoWidth;
+      if(vid>0){ clearInterval(kfTimer); return; }
+      try{ await send({type:'resume-consumer',consumer_id:con.id}); }catch(e){ /* timeout dưới tải */ }
+      try{ el.play().catch(()=>{}); }catch{}
+    }, 2000);
+    const stopKf=(ev)=>{ mLog('track '+ev+' — ngừng xin keyframe '+con.id); clearInterval(kfTimer); };
+    con.track.onended=()=>stopKf('ended');
+    con.track.onmute=()=>{ mLog('track muted '+con.id); }; // giữ vòng lặp — hết mute sẽ có frame
   }
   ws.onerror = (ev)=>{ mLog('WS error event type='+ ev?.type + ' ' + String(ev)); };
-  ws.onclose = (ev)=>{ mLog('WS closed code='+ev?.code+' reason='+ev?.reason); };
-  await new Promise((res,rej)=>{ ws.onopen=res; ws.onerror=(ev)=>rej(new Error('WS error '+(ev?.type||String(ev))+' code='+(ev?.code||''))); });
+  ws.onclose = (ev)=>{ mLog('WS closed code='+ev?.code+' reason='+ev?.reason); if(previewOn){ previewOn=false; clearPreviewInfra(); setPreviewUI(); pvStatusTxt(); } };
+  await new Promise((res,rej)=>{
+    ws.onopen=res;
+    ws.onerror=(ev)=>rej(new Error('WS error '+(ev?.type||String(ev))+' code='+(ev?.code||'')));
+    // Fix "bấm 2 lần": lần đầu tải bundle mediasoup-client mất vài trăm ms,
+    // WS đã mở xong trước khi gán onopen → lỡ sự kiện → treo mãi.
+    // Nếu readyState đã OPEN thì coi như mở rồi, resolve ngay.
+    if(ws.readyState===1){ res(); return; }
+  });
   mLog('WS open, chờ welcome...');
+  // Tự rà soát mỗi 2.5s: producer mới phát sau (hoặc consume lỡ trượt) sẽ tự được bắt — không cần bấm lại
+  previewPump = setInterval(async ()=>{
+    if(!previewOn || !ws || ws.readyState!==1 || !recvTr) return;
+    try{
+      const list=await send({type:'get-producers'});
+      for(const p of (list.producers||[])) if(!consumedPids.has(p.producer_id)) await doConsume(p);
+      pvStatusTxt();
+    }catch(e){ /* poll hết thời gian dưới tải — bỏ qua */ }
+  }, 2500);
 }
 $('#btnPreview').onclick = async ()=>{
+  if(previewOn){ stopPreview(); return; }
   if(!(await ensureRoom())) return;
   try{
     await startPreview();
   }catch(e){
-    // Lần 1 lỗi (phòng mới/router vừa khởi tạo...) → tự thử lại 1 lần, khỏi cần bấm lần 2
+    // Lần 1 lỗi (phòng mới/router vừa khởi tạo... / token refresh) → tự thử lại lần 2
+    previewOn=false; setPreviewUI();
     const msg=e?.message||String(e); const code=e?.code?` [${e.code}]`:'';
     mLog('preview thử 1 lỗi '+msg+code+' — tự thử lại ngay...');
     await new Promise(r=>setTimeout(r,900));
@@ -357,7 +404,6 @@ $('#btnPreview').onclick = async ()=>{
     catch(e2){ const m2=e2?.message||String(e2); const c2=e2?.code?` [${e2.code}]`:''; mLog('preview thử 2 lỗi '+m2+c2); alert('Preview lỗi 2 lần: '+msg+code+' | '+m2+c2); }
   }
 };
-$('#btnStopPreview').onclick=()=>{ try{ ws?.close(); }catch{} ws=null; if(recvTr) try{recvTr.close();}catch{} recvTr=null; device=null; consumers.clear(); $('#streams').innerHTML=''; mLog('stopped'); };
 </script>
 <script>
 // Fallback login handler (chạy cả khi type="module" lỗi) — đảm bảo bấm Đăng nhập luôn gọi API

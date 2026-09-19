@@ -59,8 +59,11 @@ export const roomMembersRepo = {
   },
 
   findActiveByDevice(deviceId: string): RoomMemberRow | undefined {
+    // Nếu 1 device join lại nhiều lần (nhiều member), ưu tiên bản có quyền điều khiển + online
     return db
-      .prepare<[string]>("SELECT * FROM room_members WHERE device_id = ? AND left_at IS NULL LIMIT 1")
+      .prepare<[string]>(
+        "SELECT * FROM room_members WHERE device_id = ? AND left_at IS NULL ORDER BY has_granted_control DESC, is_online DESC, joined_at DESC LIMIT 1"
+      )
       .get(deviceId) as RoomMemberRow | undefined;
   },
 
