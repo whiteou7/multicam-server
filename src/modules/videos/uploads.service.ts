@@ -5,13 +5,17 @@ import { env } from "../../config/env";
 import { uploadsRepo, UploadRow } from "../../db/repositories/uploads.repo";
 import { videosRepo } from "../../db/repositories/videos.repo";
 import { usersRepo } from "../../db/repositories/users.repo";
+import { devicesRepo } from "../../db/repositories/devices.repo";
 import { ApiError, CODE } from "../../utils/codes";
+import { buildVideoObjectKey } from "../../utils/vn-path";
+import { resolveSessionFolderName } from "../recording-sessions/recording-sessions.service";
 import { chunkPath, combineChunks, ensureDir, removeDir, sha256OfBuffer, sha256OfFile } from "./upload-fs";
 import fs from "node:fs/promises";
 
 export interface InitUploadMetadata {
   local_video_uid: string;
   device_id: string;
+  room_id?: string;
   camera_name?: string;
   session_id?: string;
   recorded_at?: string;
@@ -191,12 +195,34 @@ export async function completeUpload(app: FastifyInstance, ownerId: string, uplo
     throw new ApiError(CODE.UPLOAD_FAILED, "checksum_sha256 mismatch after assembly");
   }
 
+  const device = devicesRepo.findById(metadata.device_id);
   const videoId = randomUUID();
   const sessionId = metadata.session_id ?? "standalone";
-  const objectKey = `videos/${ownerId}/${metadata.device_id}/${sessionId}/${videoId}.mp4`;
+  const recordedAt = metadata.recorded_at ?? new Date().toISOString();
+
+  // Cấu trúc MinIO: room_id / session_id_time_vn / device_id_brand_time.mp4
+  // Folder lấy time từ recording_sessions.started_at (resolveSessionFolderName) để khớp
+  // folder session.json; tên file mới dùng recorded_at.
+  // Client không gửi room_id (quay ngoài phòng) → room segment = "_standalone".
+  const sessionFolder = resolveSessionFolderName(sessionId, recordedAt);
+  const objectKey = buildVideoObjectKey(
+    metadata.room_id,
+    sessionFolder,
+    metadata.device_id,
+    device?.model,
+    recordedAt,
+    device?.device_name
+  );
 
   await app.minio.fPutObject(env.minio.bucket, objectKey, combinedPath, {
     "Content-Type": "video/mp4",
+    session_id: sessionId,
+    device_id: metadata.device_id,
+    device_type: String(device?.device_type ?? 0),
+    phone_model: device?.model ?? "unknown",
+    camera_name: metadata.camera_name ?? (device?.camera_name || "unknown"),
+    recorded_at: metadata.recorded_at ?? new Date().toISOString(),
+    duration_ms: String(metadata.duration_ms ?? 0),
   });
 
   videosRepo.insert({

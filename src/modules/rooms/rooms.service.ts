@@ -6,7 +6,9 @@ import { recordingSessionsRepo } from "../../db/repositories/recording-sessions.
 import { RoomMemberRow, roomMembersRepo } from "../../db/repositories/room-members.repo";
 import { RoomRow, roomsRepo } from "../../db/repositories/rooms.repo";
 import { ApiError, CODE } from "../../utils/codes";
+import { shortDeviceId } from "../../utils/vn-path";
 import { closeMemberMedia, closeRoomMedia, getOrCreateRoomMedia } from "../media/media.service";
+import { finalizeSessionToMinIOBackground } from "../recording-sessions/recording-sessions.service";
 
 const INVITE_CODE_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 const INVITE_CODE_TTL_MS = 10 * 60 * 1000; // 10 min
@@ -22,10 +24,15 @@ export function generateInviteCode(): string {
 }
 
 function memberPublicShape(m: RoomMemberRow) {
+  const dev = devicesRepo.findById(m.device_id);
   return {
     member_id: m.id,
     device_id: m.device_id,
     camera_name: m.camera_name,
+    // 3 trường định danh thiết bị — UI streaming/index.html hiển thị để phân biệt máy
+    device_name: dev?.device_name ?? null,
+    device_model: dev?.model ?? null,
+    device_short_id: shortDeviceId(m.device_id),
     is_online: m.is_online,
     has_granted_control: m.has_granted_control,
     battery_level: m.battery_level,
@@ -150,8 +157,16 @@ export function listOwnedRooms(userId: string) {
   });
 }
 
-/** Xóa hẳn phòng (owner): đóng media trước, rồi hard-delete (FK cascade dọn members). */
-export function deleteRoomHard(room: RoomRow): void {
+/** Xóa hẳn phòng (owner): dừng phiên ghi (nếu có) + đóng media trước, rồi hard-delete (FK cascade dọn members). */
+export function deleteRoomHard(room: RoomRow, app?: FastifyInstance): void {
+  const activeSession = recordingSessionsRepo.findActiveByRoom(room.id);
+  if (activeSession) {
+    recordingSessionsRepo.setStopped(activeSession.id);
+    roomsRepo.setSessionId(room.id, null);
+    if (app) {
+      finalizeSessionToMinIOBackground(app, activeSession.id, "deleteRoomHard");
+    }
+  }
   try {
     closeRoomMedia(room.id);
   } catch {
@@ -379,9 +394,10 @@ export function denyMember(room: RoomRow, memberId: string) {
   return { member_id: memberId, join_status: "denied" };
 }
 
-export function closeRoom(room: RoomRow) {
+export function closeRoom(room: RoomRow, app?: FastifyInstance) {
   const activeSession = recordingSessionsRepo.findActiveByRoom(room.id);
   const sessionStopped = !!activeSession;
+  let stoppedSessionId: string | null = null;
 
   const members = roomMembersRepo.listActiveByRoom(room.id);
   for (const member of members) {
@@ -408,11 +424,16 @@ export function closeRoom(room: RoomRow) {
   }
 
   if (activeSession) {
-    recordingSessionsRepo.setStopped(activeSession.id);
+    stoppedSessionId = activeSession.id;
+    recordingSessionsRepo.setStopped(stoppedSessionId);
   }
   roomsRepo.setSessionId(room.id, null);
   roomsRepo.close(room.id);
   closeRoomMedia(room.id);
+
+  if (stoppedSessionId && app) {
+    finalizeSessionToMinIOBackground(app, stoppedSessionId, "closeRoom");
+  }
 
   return {
     closed_at: new Date().toISOString(),
@@ -544,7 +565,12 @@ export function startRecording(
   };
 }
 
-export function stopRecording(room: RoomRow, target: "all" | string[], clientCommandId: string) {
+export function stopRecording(
+  room: RoomRow,
+  target: "all" | string[],
+  clientCommandId: string,
+  app?: FastifyInstance
+) {
   const session = recordingSessionsRepo.findActiveByRoom(room.id);
   if (!session) {
     throw new ApiError(CODE.NOT_EXISTED, "Không có phiên quay đang diễn ra");
@@ -574,6 +600,10 @@ export function stopRecording(room: RoomRow, target: "all" | string[], clientCom
   recordingSessionsRepo.setStopped(session.id);
   roomsRepo.setSessionId(room.id, null);
   roomsRepo.bumpRevision(room.id);
+
+  if (app) {
+    finalizeSessionToMinIOBackground(app, session.id, "stopRecording");
+  }
 
   return { session_id: session.id, stopped_at: new Date().toISOString(), results };
 }

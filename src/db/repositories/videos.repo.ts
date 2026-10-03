@@ -112,6 +112,18 @@ export const videosRepo = {
       .get(deviceId, sessionId) as VideoRow | undefined;
   },
 
+  /**
+   * Liệt kê tất cả videos thuộc 1 phiên ghi (dùng cho session metadata export).
+   * Không phân trang — mỗi phiên giới hạn 8-16 devices nên danh sách rất nhỏ.
+   */
+  listBySession(sessionId: string): VideoRow[] {
+    return db
+      .prepare<[string]>(
+        "SELECT * FROM videos WHERE session_id = ? AND deleted_at IS NULL ORDER BY uploaded_at ASC"
+      )
+      .all(sessionId) as VideoRow[];
+  },
+
   updateNameDescription(id: string, name?: string, description?: string): void {
     const current = this.findById(id);
     if (!current) return;

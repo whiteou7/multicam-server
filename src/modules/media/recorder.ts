@@ -27,7 +27,10 @@ import * as mediasoup from "mediasoup";
 import { env } from "../../config/env";
 import { roomsRepo } from "../../db/repositories/rooms.repo";
 import { roomMembersRepo } from "../../db/repositories/room-members.repo";
+import { devicesRepo } from "../../db/repositories/devices.repo";
 import { videosRepo } from "../../db/repositories/videos.repo";
+import { buildVideoObjectKey } from "../../utils/vn-path";
+import { resolveSessionFolderName } from "../recording-sessions/recording-sessions.service";
 import { RoomMedia } from "./media.state";
 
 interface StreamRec {
@@ -47,6 +50,16 @@ interface StreamRec {
 
 interface MemberRecorder {
   memberId: string;
+  /** Session đang active lúc producer xuất hiện (Ghi ALL) — nhóm các video 1 lần quay */
+  sessionId: string | null;
+  deviceId: string;
+  /** 1=Remote, 3=Controller web, 4=Web — ghi vào metadata MP4 để nhận diện loại máy */
+  deviceType: number;
+  /** Model điện thoại thật (VD "Samsung SM-G991B") — ghi vào metadata MP4 */
+  deviceModel: string;
+  /** Tên thiết bị user tự đặt (VD "SM-S931B") — fallback khi model rỗng */
+  deviceName: string;
+  cameraName: string;
   streams: StreamRec[];
   ffmpeg: ChildProcess | null;
   sdpFile: string;
@@ -183,8 +196,17 @@ class RecorderService {
     if (rec?.streams.some((s) => s.producer.id === producer.id)) return;
 
     if (!rec) {
+      const metaRoom = roomsRepo.findById(roomId);
+      const metaMember = roomMembersRepo.findById(memberId);
+      const metaDevice = metaMember ? devicesRepo.findById(metaMember.device_id) : undefined;
       rec = {
         memberId,
+        sessionId: metaRoom?.session_id ?? null,
+        deviceId: metaMember?.device_id ?? memberId,
+        deviceType: metaDevice?.device_type ?? 0,
+        deviceModel: metaDevice?.model ?? "",
+        deviceName: metaDevice?.device_name ?? "",
+        cameraName: metaMember?.camera_name ?? `Remote-${memberId.slice(0, 4)}`,
         streams: [],
         ffmpeg: null,
         sdpFile: path.join(defaultTmpDir, `rec_${roomId.slice(0, 8)}_${memberId.slice(0, 8)}.sdp`),
@@ -378,6 +400,12 @@ class RecorderService {
       // nhưng file 36B; thêm -g 30 → 262KB). Không quá 1s mất dữ liệu kể cả bị terminate cứng.
       "-g", "30",
       "-movflags", "frag_keyframe+empty_moov",
+      // Nhúng thông tin nguồn quay vào metadata file MP4 (đọc được bằng ffprobe)
+      "-metadata", `session_id=${rec.sessionId ?? "none"}`,
+      "-metadata", `device_id=${rec.deviceId}`,
+      "-metadata", `device_type=${rec.deviceType}`,
+      "-metadata", `phone_model=${rec.deviceModel || "unknown"}`,
+      "-metadata", `camera_name=${rec.cameraName}`,
       "-y", rec.outFile,
     ];
     if (!env.recording.upload) args.splice(1, 0, "-stats");
@@ -517,14 +545,26 @@ class RecorderService {
     }
 
     const videoId = randomUUID();
-    const objectKey = `recordings/${room.owner_id}/${member.device_id}/${videoId}.mp4`;
+    const sessionId = rec.sessionId ?? "nosession";
+    // Cấu trúc MinIO: room_id / session_id_time_vn / device_id_brand_time.mp4
+    // Folder lấy time từ recording_sessions.started_at (resolveSessionFolderName) để
+    // khớp folder session.json — KHÔNG dùng rec.startedAt (lệch vài giây).
+    const sessionFolder = resolveSessionFolderName(sessionId, rec.startedAt);
+    const objectKey = buildVideoObjectKey(
+      room.id,
+      sessionFolder,
+      rec.deviceId,
+      rec.deviceModel,
+      rec.startedAt,
+      rec.deviceName
+    );
 
     // Upload NỀN — không chặn luồng dừng phát. `uploadAndIndex` tự có watchdog
     // timeout + retry cho từng lần fPutObject, nên không bao giờ treo vĩnh viễn.
     void this.uploadAndIndex(app, roomId, rec, videoId, objectKey, {
       ownerId: room.owner_id,
-      deviceId: member.device_id,
-      cameraName: member.camera_name ?? `Remote-${member.device_id.slice(0, 4)}`,
+      deviceId: rec.deviceId,
+      cameraName: rec.cameraName,
       durationMs: Math.max(500, Date.now() - rec.startedAt),
       sizeBytes: st.size,
     }).catch((e) =>
@@ -551,6 +591,12 @@ class RecorderService {
       const res = await withTimeout(
         app.minio.fPutObject(env.minio.bucket, objectKey, rec.outFile, {
           "Content-Type": "video/mp4",
+          session_id: rec.sessionId ?? "nosession",
+          device_id: rec.deviceId,
+          device_type: String(rec.deviceType ?? 0),
+          phone_model: rec.deviceModel || "unknown",
+          camera_name: rec.cameraName,
+          recorded_at: new Date(rec.startedAt).toISOString(),
         }),
         90_000
       );
@@ -579,8 +625,8 @@ class RecorderService {
       id: videoId,
       owner_id: meta.ownerId,
       device_id: meta.deviceId,
-      session_id: null,
-      local_video_uid: `server-recorder-${roomId.slice(0, 8)}-${rec.startedAt}`,
+      session_id: rec.sessionId,
+      local_video_uid: `server-recorder-${roomId.slice(0, 8)}-${rec.sessionId ?? "nosession"}-${rec.startedAt}`,
       camera_name: meta.cameraName,
       name: `Broadcast ${new Date(rec.startedAt).toISOString()}`,
       description: "Ghi tự động trên server khi phát sóng",

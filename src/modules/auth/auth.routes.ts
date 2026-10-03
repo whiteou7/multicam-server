@@ -31,6 +31,8 @@ interface LoginBody {
   device_id: string;
   device_type: number;
   device_name: string;
+  model?: string;
+  os_version?: string;
 }
 
 interface RefreshBody {
@@ -64,6 +66,8 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
       user_id: user.id,
       device_type: deviceType,
       device_name: deviceName,
+      model: body.model,
+      os_version: body.os_version,
     });
 
     const tokens = issueTokens(app, user.id, deviceId, user.account_role);

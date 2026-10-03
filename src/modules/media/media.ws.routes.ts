@@ -3,6 +3,8 @@ import type { WebSocket } from "@fastify/websocket";
 import { authenticate } from "../../middleware/authenticate";
 import { roomsRepo } from "../../db/repositories/rooms.repo";
 import { roomMembersRepo } from "../../db/repositories/room-members.repo";
+import { devicesRepo } from "../../db/repositories/devices.repo";
+import { shortDeviceId } from "../../utils/vn-path";
 import {
   broadcastToOthers,
   closeMemberMedia,
@@ -213,9 +215,24 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               if (role !== "controller") throw new Error("only the controller may list producers");
               const list = [...roomMedia.members.entries()]
                 .filter(([id]) => id !== participantId)
-                .flatMap(([memberId, m]) =>
-                  [...m.producers.values()].map((p) => ({ member_id: memberId, producer_id: p.id, kind: p.kind }))
-                );
+                .flatMap(([memberId, m]) => {
+                  // Label thiết bị để dashboard streaming hiển thị — member_id là uuid
+                  // nên cắt chuỗi vô nghĩa, phải tra về device để lấy tên/model.
+                  const row = roomMembersRepo.findById(memberId);
+                  const dev = row ? devicesRepo.findById(row.device_id) : undefined;
+                  const label = {
+                    camera_name: row?.camera_name ?? null,
+                    device_name: dev?.device_name ?? null,
+                    device_model: dev?.model ?? null,
+                    device_short_id: row ? shortDeviceId(row.device_id) : null,
+                  };
+                  return [...m.producers.values()].map((p) => ({
+                    member_id: memberId,
+                    producer_id: p.id,
+                    kind: p.kind,
+                    ...label,
+                  }));
+                });
               send(socket, { type: "producers", request_id: msg.request_id ?? null, producers: list });
               break;
             }

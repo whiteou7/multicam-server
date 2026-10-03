@@ -181,7 +181,7 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: authenticate },
     async (request) => {
       const room = roomsService.requireOwnerRoom(request.params.room_id, request.auth!.userId);
-      return ok(roomsService.deleteRoomHard(room));
+      return ok(roomsService.deleteRoomHard(room, app));
     }
   );
 
@@ -271,7 +271,8 @@ export default async function roomsRoutes(app: FastifyInstance): Promise<void> {
         requireField(body.client_command_id, "client_command_id"),
         "client_command_id"
       );
-      const result = roomsService.stopRecording(room, target, clientCommandId);
+      // Truyền `app` vào để service có thể đẩy session_metadata.json lên MinIO nền
+      const result = roomsService.stopRecording(room, target, clientCommandId, app);
       return ok(result);
     }
   );
