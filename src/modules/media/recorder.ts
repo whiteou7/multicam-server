@@ -160,8 +160,58 @@ function withTimeout<T>(
   });
 }
 
+/**
+ * Lấy duration THẬT (ms) của file MP4 bằng ffprobe. Trả về null nếu ffprobe
+ * không có / file không parse được (khi đó caller fallback về wallclock).
+ * Dùng để metadata duration_ms khớp với nội dung file, tránh trường hợp file
+ * rỗng mà vẫn báo "video 111s" như trước.
+ */
+function probeDurationMs(file: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    let proc: ChildProcess;
+    try {
+      proc = spawn(
+        env.recording.ffprobePath,
+        [
+          "-v", "error",
+          "-show_entries", "format=duration",
+          "-of", "default=noprint_wrappers=1:nokey=1",
+          file,
+        ],
+        { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = "";
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    proc.on("error", () => resolve(null));
+    proc.on("exit", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      const sec = Number.parseFloat(out.trim());
+      resolve(Number.isFinite(sec) && sec > 0 ? Math.round(sec * 1000) : null);
+    });
+  });
+}
+
 class RecorderService {
   private readonly map = new Map<string, Map<string, MemberRecorder>>(); // roomId -> (memberId -> recorder)
+  /**
+   * Producer mới đến trong lúc recorder cũ của cùng member còn đang finalize
+   * (rec.stopping = true) → KHÔNG bỏ đi, mà xếp hàng để khởi động lại recorder
+   * ngay khi recorder cũ dọn xong. Trước đây bị `return` luôn nên lần phát lại
+   * không được ghi (restart nhanh).
+   */
+  private readonly pending = new Map<
+    string,
+    { app: FastifyInstance; roomMedia: RoomMedia; roomId: string; memberId: string; producers: mediasoup.types.Producer[] }
+  >();
   private loggedArmed = false;
 
   private roomMap(roomId: string): Map<string, MemberRecorder> {
@@ -192,7 +242,19 @@ class RecorderService {
 
     const roomRecorders = this.roomMap(roomId);
     let rec = roomRecorders.get(memberId);
-    if (rec?.stopping) return;
+    if (rec?.stopping) {
+      // Recorder cũ đang finalize (gracefulFfmpegStop có thể chờ tới 15s). Producer
+      // mới của cùng member (thường là do user bật lại phát sóng) phải được GHI,
+      // nên xếp hàng lại rồi khởi động khi recorder cũ dọn xong.
+      let q = this.pending.get(memberId);
+      if (!q) {
+        q = { app, roomMedia, roomId, memberId, producers: [] };
+        this.pending.set(memberId, q);
+      }
+      q.producers.push(producer);
+      app.log.info({ roomId, memberId, kind: producer.kind }, "recorder busy stopping — queued producer for restart");
+      return;
+    }
     if (rec?.streams.some((s) => s.producer.id === producer.id)) return;
 
     if (!rec) {
@@ -223,8 +285,21 @@ class RecorderService {
       roomRecorders.set(memberId, rec);
     }
 
-    const stream = await this.openStream(app, roomMedia, roomId, rec, producer);
-    if (!stream) return;
+    let stream = await this.openStream(app, roomMedia, roomId, rec, producer);
+    if (!stream) {
+      // openStream có thể fail tạm thời (worker/router đang bận lúc nhiều máy cùng
+      // produce) — thử lại 1 lần trước khi bỏ, tránh mất bản ghi của cả một máy.
+      await new Promise((r) => setTimeout(r, 500));
+      stream = await this.openStream(app, roomMedia, roomId, rec, producer);
+    }
+    if (!stream) {
+      // openStream fail trong lúc media chưa có stream nào → recorder rỗng vô dụng,
+      // dọn luôn để không kẹt map (nếu để lại, producer kế tiếp tưởng recorder tồn tại).
+      if (rec.streams.length === 0 && !rec.ffmpeg) {
+        roomRecorders.delete(memberId);
+      }
+      return;
+    }
 
     // Nếu ffmpeg đã chạy (nhánh hiếm: producer thứ 2 tới quá muộn) thì không
     // gắn thêm được vào SDP — bỏ qua stream đó.
@@ -248,7 +323,7 @@ class RecorderService {
           // giữa GOP sẽ decode trễ; hơn nữa muxer mp4 cần keyframe đầu. Gọi 2 lần.
           void this.requestKeyframe(s.consumer);
         }
-        // Keyframe pump 2s: producer chỉ gửi keyframe khi được yêu cầu (PC từng
+        // Keyframe pump 1s: producer chỉ gửi keyframe khi được yêu cầu (PC từng
         // consume chỉ còn delta frame) → controller/preview sẽ "đen" tới khi
         // có keyframe. Pump định kỳ giữ mọi consumer nhận keyframe ổn định.
         rec!.keyframeTimer = setInterval(() => {
@@ -257,7 +332,7 @@ class RecorderService {
             void this.requestKeyframe(s.consumer);
             void this.monitorFlow(app, rec!, s);
           }
-        }, 2000);
+        }, 1000);
       }, 1200);
     }
   }
@@ -274,8 +349,9 @@ class RecorderService {
   }
 
   /** Đếm packet video qua consumer.getStats: phát hiện producer ngừng gửi hàng loạt.
-   *  tick = 2s; >=3 tick (6s) không có packet mới → cảnh báo + log lúc nối lại.
-   *  Giúp phân biệt "nguồn ngừng 20s" (màn hình tối/background) với "thiếu keyframe". */
+   *  tick = 1s (keyframeTimer); >=3 tick (~3s) không có packet mới → cảnh báo + log
+   *  lúc nối lại. Giúp phân biệt "nguồn ngừng gửi" (màn hình tối/background) với
+   *  "thiếu keyframe". */
   private async monitorFlow(
     app: FastifyInstance,
     rec: MemberRecorder,
@@ -298,7 +374,7 @@ class RecorderService {
       if (stream.stallTicks >= 3 && !stream.stallLogged) {
         stream.stallLogged = true;
         app.log.warn(
-          { roomId: rec.memberId, memberId: rec.memberId, stallSeconds: stream.stallTicks * 2 },
+          { roomId: rec.memberId, memberId: rec.memberId, stallSeconds: stream.stallTicks },
           "OBS: video producer tạm ngừng gửi packets (nguồn/theo dõi liên tục)"
         );
       } else if (stream.stallLogged && stream.stallTicks < 3) {
@@ -461,6 +537,21 @@ class RecorderService {
     } finally {
       for (const s of rec.streams) await this.closeStream(s).catch(() => undefined);
       roomRecorders.delete(memberId);
+      // Producer nào đến trong lúc đang stopping thì khởi động recorder mới ngay.
+      this.drainPending(app, roomId, memberId);
+    }
+  }
+
+  /** Khởi động lại recorder cho các producer bị xếp hàng trong lúc recorder cũ stopping. */
+  private drainPending(app: FastifyInstance, roomId: string, memberId: string): void {
+    const q = this.pending.get(memberId);
+    if (!q) return;
+    this.pending.delete(memberId);
+    app.log.info({ roomId, memberId, count: q.producers.length }, "draining queued producers → restart recorder");
+    for (const producer of q.producers) {
+      this.start(q.app, q.roomMedia, q.roomId, q.memberId, producer).catch((e: unknown) =>
+        q.app.log.error({ err: e, roomId, memberId }, "recorder restart from queue failed")
+      );
     }
   }
 
@@ -512,13 +603,69 @@ class RecorderService {
     }
   }
 
+  /**
+   * Lấy số gói RTP cuối cùng của từng stream để chẩn đoán file rỗng/thiếu. packets=0
+   * nghĩa là producer đó CHƯA TỪNG có media tới recorder (transport/ICE chưa nối
+   * hoặc nguồn không produce) — đây là bằng chứng cho triệu chứng "quay nhiều máy
+   * chỉ được N-1". Dùng ở finalize trước khi consumer bị đóng.
+   */
+  private async collectStreamStats(
+    rec: MemberRecorder
+  ): Promise<Array<{ kind: string; packets: number; closed: boolean }>> {
+    const out: Array<{ kind: string; packets: number; closed: boolean }> = [];
+    for (const s of rec.streams) {
+      let packets = s.lastPktCount;
+      try {
+        if (!s.closed && !s.consumer.closed) {
+          const stats = await s.consumer.getStats();
+          const item = stats.find(
+            (x) => (x as { rtpStream?: { packetCount?: number } }).rtpStream?.packetCount != null
+          ) as { rtpStream?: { packetCount?: number } } | undefined;
+          if (item?.rtpStream?.packetCount != null) packets = item.rtpStream.packetCount;
+        }
+      } catch {
+        /* consumer đã đóng — dùng số đã đếm được */
+      }
+      out.push({ kind: s.kind, packets: typeof packets === "number" ? packets : -1, closed: s.closed });
+    }
+    return out;
+  }
+
   private async finalize(app: FastifyInstance, roomId: string, rec: MemberRecorder): Promise<void> {
     const st = await fsp.stat(rec.outFile).catch(() => null);
+    const streamStats = await this.collectStreamStats(rec);
     if (!st || st.size === 0) {
       // Giữ lại cả file rỗng + sdp để tra cứu (theo yêu cầu: không xoá gì trong data)
       app.log.warn(
-        { roomId, memberId: rec.memberId, outFile: rec.outFile, sdpFile: rec.sdpFile, stderr: rec.stderrTail.join(" | ") },
+        {
+          roomId,
+          memberId: rec.memberId,
+          outFile: rec.outFile,
+          sdpFile: rec.sdpFile,
+          streams: streamStats,
+          stderr: rec.stderrTail.join(" | "),
+        },
         "recording empty, skip upload (file kept)"
+      );
+      return;
+    }
+
+    // File chỉ có header (ftyp ~32B, hoặc ftyp+empty moov ~1KB) là ffmpeg KHÔNG
+    // decode được frame nào (thiếu keyframe / không có RTP video) — không phải video.
+    // Trước đây chỉ check size === 0 nên các file này vẫn lên MinIO thành "video 1KB".
+    if (st.size < env.recording.minBytes) {
+      app.log.warn(
+        {
+          roomId,
+          memberId: rec.memberId,
+          outFile: rec.outFile,
+          sdpFile: rec.sdpFile,
+          sizeBytes: st.size,
+          minBytes: env.recording.minBytes,
+          streams: streamStats,
+          stderr: rec.stderrTail.join(" | "),
+        },
+        "recording has no media frames (below min size), skip upload (file kept)"
       );
       return;
     }
@@ -561,13 +708,17 @@ class RecorderService {
       rec.deviceName
     );
 
+    // duration_ms lấy từ media THẬT (ffprobe); fallback wallclock nếu ffprobe lỗi.
+    const probedMs = await probeDurationMs(rec.outFile);
+    const durationMs = probedMs ?? Math.max(500, Date.now() - rec.startedAt);
+
     // Upload NỀN — không chặn luồng dừng phát. `uploadAndIndex` tự có watchdog
     // timeout + retry cho từng lần fPutObject, nên không bao giờ treo vĩnh viễn.
     void this.uploadAndIndex(app, roomId, rec, videoId, objectKey, {
       ownerId: room.owner_id,
       deviceId: rec.deviceId,
       cameraName: rec.cameraName,
-      durationMs: Math.max(500, Date.now() - rec.startedAt),
+      durationMs,
       sizeBytes: st.size,
     }).catch((e) =>
       app.log.error({ err: e, roomId, memberId: rec.memberId }, "background upload crashed")

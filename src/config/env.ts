@@ -52,7 +52,13 @@ export const env = {
     on: (process.env.SERVER_RECORDING_ON ?? "true") === "true",
     // Binary ffmpeg trên host. Windows: cài rồi để trong PATH (hoặc trỏ file ffmpeg.exe).
     ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
+    // ffprobe (thường đi kèm ffmpeg) — dùng để lấy duration THẬT của file đã ghi.
+    ffprobePath: process.env.FFPROBE_PATH || "ffprobe",
     tmpDir: process.env.RECORDINGS_TMP_DIR ?? "./data/recordings-tmp",
+    // Ngưỡng tối thiểu để coi file là có media. File chỉ có header (ftyp ~32B,
+    // hoặc ftyp+empty moov ~1KB) vẫn khác 0 nên trước đây bị upload thành "video".
+    // Dưới ngưỡng này = ffmpeg không decode được frame nào → KHÔNG upload/insert.
+    minBytes: Number(process.env.RECORDING_MIN_BYTES ?? 10_000),
     // Bật thì đẩy file MP4 lên MinIO + insert videos. Tắt (false) để debug:
     // giữ nguyên file ở tmpDir, không upload — log đầy đủ thông tin file + stderr ffmpeg.
     upload: (process.env.SERVER_RECORDING_UPLOAD ?? "true") === "true",

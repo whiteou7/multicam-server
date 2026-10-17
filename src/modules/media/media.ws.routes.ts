@@ -85,6 +85,8 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
 
       const roomMedia = await getOrCreateRoomMedia(app, room.id);
       const member: MemberMedia = registerMember(roomMedia, participantId, socket);
+      // Hướng của từng transport (send/recv) — cần để dọn transport cũ cùng hướng.
+      const transportDirs = new Map<string, string>();
 
       send(socket, {
         type: "welcome",
@@ -112,8 +114,30 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               if (role === "controller" && direction !== "recv") {
                 throw new Error("the controller may only open recv transports");
               }
+              // Một remote chỉ dùng MỘT send transport cho mỗi lần phát sóng. Khi
+              // bật lại phát sóng, client đã đóng transport cũ nhưng server chỉ biết
+              // khi DTLS chuyển "closed" (trễ vài giây) — trong khoảng trễ đó recorder
+              // cũ vẫn chạy nên producer MỚI bị rơi vào nhánh "skip late stream" ⇒
+              // mất bản ghi (triệu chứng quay nhiều máy chỉ được N-1). Đóng dứt khoát
+              // transport cũ CÙNG HƯỚNG ngay khi mở transport mới để recorder cũ
+              // finalize trước khi producer mới xuất hiện.
+              if (role === "remote") {
+                for (const [id, t] of [...member.transports]) {
+                  if (transportDirs.get(id) !== direction) continue;
+                  if (!t.closed) {
+                    try {
+                      t.close();
+                    } catch {
+                      /* đã đóng */
+                    }
+                  }
+                  member.transports.delete(id);
+                  transportDirs.delete(id);
+                }
+              }
               const transport = await createWebRtcTransport(roomMedia.router);
               member.transports.set(transport.id, transport);
+              transportDirs.set(transport.id, direction);
               transport.on("dtlsstatechange", (state) => {
                 if (state === "closed") transport.close();
               });
