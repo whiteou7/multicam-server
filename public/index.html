@@ -294,7 +294,7 @@ $('#btnProduce').onclick = async()=>{
 };
 
 // ===== Preview recv — workflow 1 lần bấm (ON/OFF toggle, tự self-heal) =====
-let previewOn=false, previewPump=null, consumedPids=new Set();
+let previewOn=false, previewPump=null, consumedPids=new Set(), memberBoxes=new Map();
 function setPreviewUI(){
   const b=$('#btnPreview'); if(!b) return;
   b.textContent = previewOn ? '■ Tắt preview' : '▶ Bật preview (recv)';
@@ -310,6 +310,11 @@ function clearPreviewInfra(){
   try{ if(ws) ws.close(); }catch{} ws=null;
   if(recvTr) try{ recvTr.close(); }catch{} recvTr=null;
   device=null; consumers.clear(); consumedPids.clear();
+  for(const info of memberBoxes.values()){
+    if(info.kfTimer) clearInterval(info.kfTimer);
+    try{ info.con.close(); }catch{}
+  }
+  memberBoxes.clear();
   $('#streams').innerHTML='';
 }
 function stopPreview(){ previewOn=false; clearPreviewInfra(); setPreviewUI(); mLog('đã tắt preview'); }
@@ -321,12 +326,12 @@ async function startPreview(){
   const tok = await api(`/rooms/${roomId}/preview-token`,{method:'POST',body:JSON.stringify({quality:'low',protocol:'webrtc'})});
   const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+cfg.host+':'+cfg.port+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
   mLog('preview: '+wsUrl);
-  ws = new WebSocket(wsUrl); const mcV = await getMediasoup(); device=new mcV.Device(); await device.load({routerRtpCapabilities: tok.rtp_capabilities});
-  let reqId=0, pending=new Map();
+  ws = new WebSocket(wsUrl);
+  let reqId=0, pending=new Map(), msgsReady=false, buf=[];
   function send(o){ const id='req_'+(++reqId); ws.send(JSON.stringify({request_id:id,...o})); return new Promise((res,rej)=>{ const t=setTimeout(()=>rej(new Error('timeout '+o.type)),8000); pending.set(id,{res,rej,t});});}
-  ws.onmessage = async e=>{
-    const m=JSON.parse(e.data); mLog('<= '+m.type+' '+JSON.stringify(m).slice(0,120));
-    if(m.request_id&&pending.has(m.request_id)){ const p=pending.get(m.request_id); clearTimeout(p.t); pending.delete(m.request_id); if(m.type==='error') p.rej(new Error(m.message)); else p.res(m); }
+  // Fix lỡ welcome/new-producer: gán onmessage NGAY (trước getMediasoup/device.load),
+  // tin đến sớm được buffer lại, xử lý sau khi Device sẵn sàng — không mất welcome.
+  async function handleMsg(m){
     if(m.type==='welcome'){ // create recv transport
       mLog('welcome rtpCapabilities codecs='+ (device.rtpCapabilities.codecs?.length||0));
       const tr=await send({type:'create-transport',direction:'recv'});
@@ -337,47 +342,82 @@ async function startPreview(){
       const list=await send({type:'get-producers'}); mLog('get-producers count='+(list.producers?.length||0)); for(const p of (list.producers||[])) await doConsume(p);
       pvStatusTxt();
     }
-    if(m.type==='new-producer'){ mLog('new-producer kind='+m.kind+' id='+m.producer_id); await doConsume(m); }
-    if(m.type==='producer-closed'){ mLog('producer-closed '+m.producer_id); const el=document.getElementById('s_'+m.producer_id); if(el) el.remove(); pvStatusTxt(); }
+    if(m.type==='new-producer'){ mLog('new-producer kind='+m.kind+' id='+(m.producer_id||'').slice(0,8)); await doConsume(m); }
+    if(m.type==='producer-closed'){
+      mLog('producer-closed '+(m.producer_id||'').slice(0,8));
+      for(const [mid,info] of memberBoxes){
+        if(info.producerId===m.producer_id){
+          if(info.kfTimer) clearInterval(info.kfTimer);
+          try{ info.con.close(); }catch{}
+          try{ info.box.remove(); }catch{}
+          memberBoxes.delete(mid); pvStatusTxt();
+        }
+      }
+    }
+  }
+  ws.onmessage = async e=>{
+    const m=JSON.parse(e.data); mLog('<= '+m.type+' '+JSON.stringify(m).slice(0,110));
+    if(m.request_id&&pending.has(m.request_id)){ const p=pending.get(m.request_id); clearTimeout(p.t); pending.delete(m.request_id); if(m.type==='error') p.rej(new Error(m.message)); else p.res(m); return; }
+    if(!msgsReady){ buf.push(m); return; }
+    await handleMsg(m);
   };
   async function doConsume(p){
-    if(!recvTr) return; if(consumedPids.has(p.producer_id)) { mLog('skip duplicate '+p.producer_id); return; } mLog('doConsume '+p.producer_id+' kind='+p.kind); let r; try{ r=await send({type:'consume',transport_id:recvTr.id,producer_id:p.producer_id,rtp_capabilities:device.rtpCapabilities}); }catch(e){ mLog('consume send err '+ (e?.message||String(e))); return; }
-    let con; try{ con=await recvTr.consume({id:r.consumer_id, producerId:r.producer_id, kind:r.kind, rtpParameters:r.rtp_parameters}); }catch(e){ mLog('consume err '+ (e?.message||String(e))); return; }
+    if(!recvTr) return;
+    // Đánh dấu NGAY (đồng bộ, trước await) — previewPump + new-producer gọi song song
+    // cùng 1 producer sẽ không tạo trùng consumer.
+    if(consumedPids.has(p.producer_id)) { mLog('skip duplicate '+(p.producer_id||'').slice(0,8)); return; }
     consumedPids.add(p.producer_id);
-    mLog('consumed '+con.id+' kind='+con.kind+' track muted='+con.track.muted+' enabled='+con.track.enabled+' readyState='+con.track.readyState);
-    const stream=new MediaStream([con.track]); consumers.set(con.id,con);
-    const box=document.createElement('div'); box.className='streamBox'; box.id='s_'+p.producer_id;
-    box.innerHTML=`<div class="small"><b>${p.camera_name||'?'}</b> • ${[p.device_name,p.device_model].filter(Boolean).join(' · ')||'?'} <span class="mono">${p.device_short_id||p.member_id.slice(0,8)}</span> • ${p.kind}</div>`;
-    // dashboard chỉ xem video, bỏ nghe audio để đỡ vọng
-    if(con.kind==='audio'){ mLog('audio consumed (muted, không hiển thị) '+con.id); try{ await send({type:'resume-consumer',consumer_id:con.id}); }catch(e){ mLog('resume audio err '+(e?.message||'')); } return; }
-    let el; el=document.createElement('video'); el.autoplay=true; el.playsInline=true; el.muted=true; el.srcObject=stream; el.style.width='100%'; el.style.height='auto'; el.onloadedmetadata=()=>{ mLog('video metadata '+el.videoWidth+'x'+el.videoHeight); el.play().catch(e=>mLog('play err '+e.message)); pvStatusTxt(); };
-    box.appendChild(el); box.onclick=()=>{ if(document.fullscreenElement) document.exitFullscreen(); else box.requestFullscreen().catch(()=>{}); }; document.getElementById('streams').appendChild(box);
-    con.track.onunmute=()=>{ mLog('track unmuted '+con.id+' kind='+con.kind); if(con.kind==='video' && el.videoWidth===0) el.play().catch(()=>{}); };
-    try{ await send({type:'resume-consumer',consumer_id:con.id}); mLog('resume-consumer sent '+con.id); }catch(e){ mLog('resume err '+(e?.message||String(e))); }
-    setTimeout(()=>mLog('track after resume muted='+con.track.muted+' readyState='+con.track.readyState), 1500);
-    // Chống đen màn: producer chỉ gửi delta frame, keyframe dễ rơi trước khi DTLS/ICE xong.
-    // Vòng lặp 2s xin keyframe lại (qua resume-consumer) cho tới khi video có frame đầu tiên.
+    mLog('doConsume '+(p.producer_id||'').slice(0,8)+' kind='+p.kind+' member='+(p.member_id||'').slice(0,8));
+    let r; try{ r=await send({type:'consume',transport_id:recvTr.id,producer_id:p.producer_id,rtp_capabilities:device.rtpCapabilities}); }catch(e){ consumedPids.delete(p.producer_id); mLog('consume send err '+ (e?.message||String(e))); return; }
+    let con; try{ con=await recvTr.consume({id:r.consumer_id, producerId:r.producer_id, kind:r.kind, rtpParameters:r.rtp_parameters}); }catch(e){ consumedPids.delete(p.producer_id); mLog('consume err '+ (e?.message||String(e))); return; }
+    consumers.set(con.id,con);
+    mLog('consumed '+con.id.slice(0,8)+' kind='+con.kind+' muted='+con.track.muted+' readyState='+con.track.readyState);
+    try{ await send({type:'resume-consumer',consumer_id:con.id}); }catch(e){ mLog('resume err '+(e?.message||String(e))); }
+    // Audio: chỉ resume để nhận; dashboard không hiển thị
+    if(con.kind==='audio'){ mLog('audio consumed (không hiển thị) '+con.id.slice(0,8)); return; }
+    // ===== Video — MỘT box duy nhất cho mỗi member =====
+    const prev=memberBoxes.get(p.member_id);
+    if(prev && prev.producerId!==p.producer_id){
+      // Phone phát trùng (2 producer video cùng member) → thay box cũ, không chồng nhiều preview
+      mLog('member phát lần 2 — thay producer '+(prev.producerId||'').slice(0,8)+' → '+(p.producer_id||'').slice(0,8));
+      consumedPids.add(prev.producerId); // chặn pump wire lại producer cũ
+      if(prev.kfTimer) clearInterval(prev.kfTimer);
+      try{ prev.con.close(); }catch{}
+      try{ prev.box.remove(); }catch{}
+    }
+    const stream=new MediaStream([con.track]);
+    const box=document.createElement('div'); box.className='streamBox'; box.id='s_'+p.member_id;
+    box.innerHTML=`<div class="small"><b>${p.camera_name||'?'}</b> • ${[p.device_name,p.device_model].filter(Boolean).join(' · ')||'?'} <span class="mono">${p.device_short_id||p.member_id.slice(0,8)}</span></div>`;
+    let el=document.createElement('video'); el.autoplay=true; el.playsInline=true; el.muted=true; el.srcObject=stream; el.style.width='100%'; el.style.height='auto';
+    el.onloadedmetadata=()=>{ mLog('video metadata '+el.videoWidth+'x'+el.videoHeight); el.play().catch(e=>mLog('play err '+e.message)); pvStatusTxt(); };
+    box.appendChild(el); box.onclick=()=>{ if(document.fullscreenElement) document.exitFullscreen(); else box.requestFullscreen().catch(()=>{}); };
+    document.getElementById('streams').appendChild(box);
+    con.track.onunmute=()=>{ mLog('track unmuted '+con.id.slice(0,8)+' '+con.kind); if(el.videoWidth===0) el.play().catch(()=>{}); };
+    con.track.onmute=()=>mLog('track muted '+con.id.slice(0,8));
+    con.track.onended=()=>{ mLog('track ended '+con.id.slice(0,8)); if(memberBoxes.get(p.member_id)?.producerId===p.producer_id){ memberBoxes.delete(p.member_id); } try{ el.remove(); }catch{} pvStatusTxt(); };
+    // Server keyframe PUMP 1s + resume sẽ cho frame đầu ~1-2s. Vòng 2s này là lưới an
+    // toàn cuối (xin lại keyframe); vừa có frame (videoWidth>0) thì ngừng.
     const kfTimer = setInterval(async ()=>{
-      if(!previewOn || !con || con.closed) { clearInterval(kfTimer); return; }
-      const vid=el.videoWidth;
-      if(vid>0){ clearInterval(kfTimer); return; }
+      if(!previewOn || !con || con.closed){ clearInterval(kfTimer); return; }
+      if(el.videoWidth>0){ clearInterval(kfTimer); return; }
       try{ await send({type:'resume-consumer',consumer_id:con.id}); }catch(e){ /* timeout dưới tải */ }
       try{ el.play().catch(()=>{}); }catch{}
     }, 2000);
-    const stopKf=(ev)=>{ mLog('track '+ev+' — ngừng xin keyframe '+con.id); clearInterval(kfTimer); };
-    con.track.onended=()=>stopKf('ended');
-    con.track.onmute=()=>{ mLog('track muted '+con.id); }; // giữ vòng lặp — hết mute sẽ có frame
+    memberBoxes.set(p.member_id,{producerId:p.producer_id,con,el,box,kfTimer});
+    pvStatusTxt();
   }
   ws.onerror = (ev)=>{ mLog('WS error event type='+ ev?.type + ' ' + String(ev)); };
   ws.onclose = (ev)=>{ mLog('WS closed code='+ev?.code+' reason='+ev?.reason); if(previewOn){ previewOn=false; clearPreviewInfra(); setPreviewUI(); pvStatusTxt(); } };
   await new Promise((res,rej)=>{
     ws.onopen=res;
     ws.onerror=(ev)=>rej(new Error('WS error '+(ev?.type||String(ev))+' code='+(ev?.code||'')));
-    // Fix "bấm 2 lần": lần đầu tải bundle mediasoup-client mất vài trăm ms,
-    // WS đã mở xong trước khi gán onopen → lỡ sự kiện → treo mãi.
-    // Nếu readyState đã OPEN thì coi như mở rồi, resolve ngay.
+    // Nếu readyState đã OPEN (mở xong khi đang tải bundle) thì coi như xong ngay.
     if(ws.readyState===1){ res(); return; }
   });
+  mLog('WS open, buffer='+buf.length);
+  const mcV = await getMediasoup(); device=new mcV.Device(); await device.load({routerRtpCapabilities: tok.rtp_capabilities});
+  msgsReady=true;
+  while(buf.length){ const m=buf.shift(); await handleMsg(m); }
   mLog('WS open, chờ welcome...');
   // Tự rà soát mỗi 2.5s: producer mới phát sau (hoặc consume lỡ trượt) sẽ tự được bắt — không cần bấm lại
   previewPump = setInterval(async ()=>{

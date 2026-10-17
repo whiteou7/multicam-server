@@ -90,12 +90,14 @@ export function buildSessionFolderName(sessionId: string, startedAt: string | nu
  * trong vòng ~100s sẽ ra cùng short id. Chấp nhận được nếu mỗi máy một model riêng;
  * nếu cần duy nhất tuyệt đối thì thêm unique suffix lúc upload.
  */
-export const SHORT_DEVICE_ID_LEN = 12;
+export const SHORT_DEVICE_ID_LEN = 4;
 
 export function shortDeviceId(deviceId: string | null | undefined): string {
   const safe = sanitizeObjectPath(deviceId ?? "");
   if (!safe || safe === "unknown") return "device";
-  return safe.slice(0, SHORT_DEVICE_ID_LEN);
+  // Lấy 4 ký tự CUỐI (phần random phân biệt thiết bị), thay vì 4 ký tự đầu luôn là
+  // "devi…"/"device_" giống hệt nhau.
+  return safe.slice(-SHORT_DEVICE_ID_LEN);
 }
 
 /**

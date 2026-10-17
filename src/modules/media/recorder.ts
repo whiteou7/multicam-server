@@ -199,6 +199,9 @@ class RecorderService {
       const metaRoom = roomsRepo.findById(roomId);
       const metaMember = roomMembersRepo.findById(memberId);
       const metaDevice = metaMember ? devicesRepo.findById(metaMember.device_id) : undefined;
+      // timestamp dùng chung cho cặp file sdp+mp4 của lần quay này → không ghi đè
+      // lên file của lần phát sóng trước (giữ lại toàn bộ lịch sử trong data)
+      const stamp = Date.now();
       rec = {
         memberId,
         sessionId: metaRoom?.session_id ?? null,
@@ -206,11 +209,11 @@ class RecorderService {
         deviceType: metaDevice?.device_type ?? 0,
         deviceModel: metaDevice?.model ?? "",
         deviceName: metaDevice?.device_name ?? "",
-        cameraName: metaMember?.camera_name ?? `Remote-${memberId.slice(0, 4)}`,
+        cameraName: metaMember?.camera_name ?? `Remote-${memberId.slice(-4)}`,
         streams: [],
         ffmpeg: null,
-        sdpFile: path.join(defaultTmpDir, `rec_${roomId.slice(0, 8)}_${memberId.slice(0, 8)}.sdp`),
-        outFile: path.join(defaultTmpDir, `rec_${roomId.slice(0, 8)}_${memberId.slice(0, 8)}_${Date.now()}.mp4`),
+        sdpFile: path.join(defaultTmpDir, `rec_${roomId.slice(0, 8)}_${memberId.slice(0, 8)}_${stamp}.sdp`),
+        outFile: path.join(defaultTmpDir, `rec_${roomId.slice(0, 8)}_${memberId.slice(0, 8)}_${stamp}.mp4`),
         startedAt: Date.now(),
         startTimer: null,
         stopping: false,
@@ -512,11 +515,11 @@ class RecorderService {
   private async finalize(app: FastifyInstance, roomId: string, rec: MemberRecorder): Promise<void> {
     const st = await fsp.stat(rec.outFile).catch(() => null);
     if (!st || st.size === 0) {
+      // Giữ lại cả file rỗng + sdp để tra cứu (theo yêu cầu: không xoá gì trong data)
       app.log.warn(
-        { roomId, memberId: rec.memberId, outFile: rec.outFile, stderr: rec.stderrTail.join(" | ") },
-        "recording empty, skip upload"
+        { roomId, memberId: rec.memberId, outFile: rec.outFile, sdpFile: rec.sdpFile, stderr: rec.stderrTail.join(" | ") },
+        "recording empty, skip upload (file kept)"
       );
-      await fsp.rm(rec.outFile, { force: true }).catch(() => undefined);
       return;
     }
 
@@ -533,7 +536,6 @@ class RecorderService {
         },
         "recording UPLOAD SKIPPED (SERVER_RECORDING_UPLOAD=false) — file kept for debug"
       );
-      await fsp.rm(rec.sdpFile, { force: true }).catch(() => undefined);
       return;
     }
 
@@ -574,8 +576,9 @@ class RecorderService {
 
   /**
    * Đẩy file MP4 lên MinIO (watchdog 90s/lần + retry 3 lần), chỉ khi thành công
-   * mới insert vào bảng videos rồi xoá file tạm. Thất bại sau tất cả lượt:
-   * giữ nguyên file ở tmpDir để cứu thủ công, KHÔNG insert videos.
+   * mới insert vào bảng videos. File LUÔN được giữ lại trong tmpDir
+   * (./data/recordings-tmp) sau khi upload — kể cả thành công hay thất bại —
+   * để tra cứu lại sau. Thất bại sau tất cả lượt: KHÔNG insert videos.
    */
   private async uploadAndIndex(
     app: FastifyInstance,
@@ -615,9 +618,8 @@ class RecorderService {
     if (lastErr) {
       app.log.error(
         { roomId, memberId, objectKey, outFile: rec.outFile, size: meta.sizeBytes, err: lastErr },
-        "minio upload FAILED after 3 attempts — file kept, videos row NOT inserted"
+        "minio upload FAILED after 3 attempts — files kept, videos row NOT inserted"
       );
-      await fsp.rm(rec.sdpFile, { force: true }).catch(() => undefined);
       return;
     }
 
@@ -646,9 +648,12 @@ class RecorderService {
       "broadcast recording saved to MinIO"
     );
 
-    // Xoá file tạm (sdp + video) sau khi đã đẩy lên MinIO
-    await fsp.rm(rec.outFile, { force: true }).catch(() => undefined);
-    await fsp.rm(rec.sdpFile, { force: true }).catch(() => undefined);
+    // GIỮ LẠI tất cả file trong data/recordings-tmp theo yêu cầu (MP4 + SDP) —
+    // không xoá gì sau khi upload. Muốn dọn thì xoá tay hoặc thêm job cleanup riêng.
+    app.log.info(
+      { roomId, memberId, outFile: rec.outFile, sdpFile: rec.sdpFile },
+      "recording files kept in data folder (not deleted after upload)"
+    );
   }
 }
 

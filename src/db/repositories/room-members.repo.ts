@@ -180,6 +180,44 @@ export const roomMembersRepo = {
     );
   },
 
+  // Member phone cùng user, cùng phòng, đã im lặng (không sync heartbeat) quá lâu.
+  // Dùng để dọn "xác" khi app cài lại / xoá dữ liệu / đổi máy tạo device_id mới.
+  listStalePhoneSiblings(
+    roomId: string,
+    userId: string,
+    excludeDeviceId: string,
+    staleBefore: string,
+  ): RoomMemberRow[] {
+    return db
+      .prepare(
+        `SELECT m.* FROM room_members m
+         JOIN devices d ON d.id = m.device_id
+         WHERE m.room_id = ? AND m.user_id = ? AND m.device_id <> ?
+           AND m.left_at IS NULL AND m.join_status = 'approved'
+           AND d.device_type IN (1, 2) AND m.last_seen < ?`
+      )
+      .all(roomId, userId, excludeDeviceId, staleBefore) as RoomMemberRow[];
+  },
+
+  // Mọi member phone trên toàn bộ phòng đã im lặng quá lâu (dùng cho sweep nền).
+  listStalePhoneMembers(staleBefore: string): RoomMemberRow[] {
+    return db
+      .prepare(
+        `SELECT m.* FROM room_members m
+         JOIN devices d ON d.id = m.device_id
+         WHERE m.left_at IS NULL AND m.join_status = 'approved'
+           AND d.device_type IN (1, 2) AND m.last_seen < ?`
+      )
+      .all(staleBefore) as RoomMemberRow[];
+  },
+
+  // Các member đang hoạt động của một device (dùng khi logout để rời mọi phòng).
+  listActiveByDevice(deviceId: string): RoomMemberRow[] {
+    return db
+      .prepare("SELECT * FROM room_members WHERE device_id = ? AND left_at IS NULL")
+      .all(deviceId) as RoomMemberRow[];
+  },
+
   setLeft(memberId: string, leftRevision: number): void {
     db.prepare(
       `UPDATE room_members SET left_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), left_revision = ?,

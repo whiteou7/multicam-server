@@ -10,6 +10,7 @@ import { assertPassword, assertOneOf, assertString, requireField } from "../../u
 import { issueTokens } from "./auth.service";
 import { RefreshTokenPayload } from "../../types/auth";
 import { authenticate } from "../../middleware/authenticate";
+import { leaveAllRoomsForDevice } from "../rooms/rooms.service";
 
 const VERIFY_CODE_TTL_SECONDS = 300; // 5 min
 const VERIFY_CODE_THROTTLE_SECONDS = 120;
@@ -130,6 +131,12 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: authenticate },
     async (request) => {
       devicesRepo.setRefreshToken(request.auth!.deviceId, null);
+      // Đăng xuất = rời mọi phòng → tránh member "xác" còn nằm trong phòng.
+      try {
+        leaveAllRoomsForDevice(request.auth!.deviceId);
+      } catch {
+        /* noop */
+      }
       return ok({});
     }
   );

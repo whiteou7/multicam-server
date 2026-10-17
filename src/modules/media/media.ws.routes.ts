@@ -28,6 +28,20 @@ function sendError(socket: WebSocket, message: string, requestId?: unknown): voi
   send(socket, { type: "error", message, request_id: requestId ?? null });
 }
 
+// Label thiết bị cho một member — member_id là uuid nên phải tra về device để lấy
+// tên/model. Dùng chung cho get-producers VÀ new-producer (nếu new-producer thiếu
+// label thì khi preview bật TRƯỚC lúc phone phát, dashboard không hiện thông tin máy).
+function memberLabel(memberId: string): Record<string, string | null> {
+  const row = roomMembersRepo.findById(memberId);
+  const dev = row ? devicesRepo.findById(row.device_id) : undefined;
+  return {
+    camera_name: row?.camera_name ?? null,
+    device_name: dev?.device_name ?? null,
+    device_model: dev?.model ?? null,
+    device_short_id: row ? shortDeviceId(row.device_id) : null,
+  };
+}
+
 // Minimal mediasoup signaling: SDP/ICE never travels over this codebase's
 // REST+polling transport (see rooms.service.getPreviewToken), so this socket
 // carries create-transport/connect-transport/produce/consume instead. Once a
@@ -147,6 +161,7 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                 member_id: participantId,
                 producer_id: producer.id,
                 kind: producer.kind,
+                ...memberLabel(participantId),
               });
               // Ghi lại broadcast ngay trên server (mỗi remote 1 file MP4 khi dừng phát)
               recorderService
@@ -180,6 +195,22 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                   void consumer.requestKeyFrame().catch(() => undefined);
                 }
               });
+              // Keyframe PUMP: mediasoup chỉ đẩy delta frame về consumer mới có — nếu PLI đầu
+              // bị rơi lúc SRTP/DTLS còn đang khởi tạo (nhất là "bật preview trước, phone phát
+              // sau") thì consumer treo mãi. Pump 1s/1 lần tới khi consumer đóng ⇒ controller
+              // bao giờ cũng nhận được keyframe → video tự hiện, KHÔNG phụ thuộc thứ tự.
+              if (consumer.kind === "video") {
+                void consumer.requestKeyFrame().catch(() => undefined);
+                const pump = setInterval(() => {
+                  if (consumer.closed) {
+                    clearInterval(pump);
+                    return;
+                  }
+                  void consumer.requestKeyFrame().catch(() => undefined);
+                }, 1000);
+                consumer.once("transportclose", () => clearInterval(pump));
+                consumer.once("producerclose", () => clearInterval(pump));
+              }
               send(socket, {
                 type: "consumed",
                 request_id: msg.request_id ?? null,
@@ -216,16 +247,7 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               const list = [...roomMedia.members.entries()]
                 .filter(([id]) => id !== participantId)
                 .flatMap(([memberId, m]) => {
-                  // Label thiết bị để dashboard streaming hiển thị — member_id là uuid
-                  // nên cắt chuỗi vô nghĩa, phải tra về device để lấy tên/model.
-                  const row = roomMembersRepo.findById(memberId);
-                  const dev = row ? devicesRepo.findById(row.device_id) : undefined;
-                  const label = {
-                    camera_name: row?.camera_name ?? null,
-                    device_name: dev?.device_name ?? null,
-                    device_model: dev?.model ?? null,
-                    device_short_id: row ? shortDeviceId(row.device_id) : null,
-                  };
+                  const label = memberLabel(memberId);
                   return [...m.producers.values()].map((p) => ({
                     member_id: memberId,
                     producer_id: p.id,

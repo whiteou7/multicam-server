@@ -9,7 +9,7 @@ import { devicesRepo } from "../../db/repositories/devices.repo";
 import { ApiError, CODE } from "../../utils/codes";
 import { buildVideoObjectKey } from "../../utils/vn-path";
 import { resolveSessionFolderName } from "../recording-sessions/recording-sessions.service";
-import { chunkPath, combineChunks, ensureDir, removeDir, sha256OfBuffer, sha256OfFile } from "./upload-fs";
+import { chunkPath, combineChunks, ensureDir, sha256OfBuffer, sha256OfFile } from "./upload-fs";
 import fs from "node:fs/promises";
 
 export interface InitUploadMetadata {
@@ -190,7 +190,11 @@ export async function completeUpload(app: FastifyInstance, ownerId: string, uplo
 
   const actualChecksum = await sha256OfFile(combinedPath);
   if (actualChecksum.toLowerCase() !== upload.checksum_sha256.toLowerCase()) {
-    await removeDir(upload.tmp_dir);
+    // KHÔNG xoá file theo yêu cầu — giữ nguyên chunk + combined.mp4 để tra cứu
+    app.log.warn(
+      { uploadId, tmpDir: upload.tmp_dir, combinedPath },
+      "checksum mismatch after assembly — files kept (not deleted)"
+    );
     uploadsRepo.setStatus(uploadId, "aborted");
     throw new ApiError(CODE.UPLOAD_FAILED, "checksum_sha256 mismatch after assembly");
   }
@@ -247,7 +251,11 @@ export async function completeUpload(app: FastifyInstance, ownerId: string, uplo
   usersRepo.incrementStorageUsed(ownerId, upload.file_size);
 
   uploadsRepo.setStatus(uploadId, "completed");
-  await removeDir(upload.tmp_dir);
+  // KHÔNG xoá thư mục chunk theo yêu cầu — giữ toàn bộ file trong data/upload-tmp
+  app.log.info(
+    { uploadId, tmpDir: upload.tmp_dir, objectKey },
+    "upload completed — chunk files kept in data folder (not deleted)"
+  );
 
   const url = await app.minio.presignedGetObject(env.minio.bucket, objectKey, 3600);
   const video = videosRepo.findById(videoId)!;
@@ -268,7 +276,8 @@ export async function abortUpload(ownerId: string, uploadId: string): Promise<vo
   if (!upload || upload.owner_id !== ownerId) {
     throw new ApiError(CODE.NOT_EXISTED, "Upload session not found");
   }
-  await removeDir(upload.tmp_dir);
+  // KHÔNG xoá file theo yêu cầu — chunk đã nhận vẫn nằm trong data/upload-tmp.
+  // Chỉ dọn bản ghi tiến độ trong DB.
   uploadsRepo.deleteChunks(uploadId);
   uploadsRepo.setStatus(uploadId, "aborted");
 }

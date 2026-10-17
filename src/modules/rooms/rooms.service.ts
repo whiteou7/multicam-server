@@ -197,7 +197,7 @@ function ensureOwnerMember(room: RoomRow, ownerUserId: string, ownerDeviceId: st
     room_id: room.id,
     device_id: ownerDeviceId,
     user_id: ownerUserId,
-    camera_name: ownerDevice?.camera_name ?? `Controller-${ownerDeviceId.slice(0, 4)}`,
+    camera_name: ownerDevice?.camera_name ?? `Controller-${ownerDeviceId.slice(-4)}`,
     joined_revision: revision,
     join_status: "approved",
   });
@@ -217,6 +217,75 @@ export function discoverableRooms() {
       max_members: room.max_members,
     };
   });
+}
+
+// Thời gian im lặng tối đa trước khi coi một member phone là "xác" (heartbeat sync_device
+// chỉ 3-5s nên >10 phút không thấy = tiến trình đã chết, không còn điều khiển được).
+const STALE_MEMBER_MS = 10 * 60 * 1000;
+
+// Cài lại app / xoá dữ liệu / đổi máy tạo device_id MỚI, nhưng member cũ không kịp leave
+// nên nằm mãi trong phòng (is_online=1, last_seen cũ) → controller thấy thừa thành viên
+// và gửi lệnh ghi tới thiết bị chết. Đóng các member phone cùng tài khoản đã im lặng lâu.
+function closeStaleSiblingMembers(roomId: string, userId: string, excludeDeviceId: string): void {
+  const staleBefore = new Date(Date.now() - STALE_MEMBER_MS).toISOString();
+  const stale = roomMembersRepo.listStalePhoneSiblings(
+    roomId,
+    userId,
+    excludeDeviceId,
+    staleBefore
+  );
+  if (stale.length === 0) return;
+  const revision = roomsRepo.bumpRevision(roomId);
+  for (const m of stale) {
+    roomMembersRepo.setLeft(m.id, revision);
+    closeMemberMedia(roomId, m.id);
+  }
+}
+
+/**
+ * Sweep nền: đóng mọi member phone đã im lặng quá STALE_MEMBER_MS trên TẤT CẢ phòng.
+ * Xử lý các trường hợp không thể bắt sự kiện leave: app bị kill/crash, xoá dữ liệu,
+ * cài lại đổi device_id, mất mạng… → dashboard không còn thấy thành viên "ma".
+ * Chỉ áp cho device_type 1/2 (phone); web dashboard (4) không heartbeat nên bỏ qua.
+ */
+export function sweepStaleMembers(): number {
+  const staleBefore = new Date(Date.now() - STALE_MEMBER_MS).toISOString();
+  const stale = roomMembersRepo.listStalePhoneMembers(staleBefore);
+  if (stale.length === 0) return 0;
+  const byRoom = new Map<string, typeof stale>();
+  for (const m of stale) {
+    const list = byRoom.get(m.room_id) ?? [];
+    list.push(m);
+    byRoom.set(m.room_id, list);
+  }
+  for (const [roomId, members] of byRoom) {
+    const revision = roomsRepo.bumpRevision(roomId);
+    for (const m of members) {
+      roomMembersRepo.setLeft(m.id, revision);
+      closeMemberMedia(roomId, m.id);
+    }
+  }
+  return stale.length;
+}
+
+/** Logout: đóng mọi member đang hoạt động của device này (rời tất cả phòng). */
+export function leaveAllRoomsForDevice(deviceId: string): number {
+  const members = roomMembersRepo.listActiveByDevice(deviceId);
+  if (members.length === 0) return 0;
+  const byRoom = new Map<string, typeof members>();
+  for (const m of members) {
+    const list = byRoom.get(m.room_id) ?? [];
+    list.push(m);
+    byRoom.set(m.room_id, list);
+  }
+  for (const [roomId, list] of byRoom) {
+    const revision = roomsRepo.bumpRevision(roomId);
+    for (const m of list) {
+      roomMembersRepo.setLeft(m.id, revision);
+      closeMemberMedia(roomId, m.id);
+    }
+  }
+  return members.length;
 }
 
 export function joinRoom(
@@ -240,6 +309,8 @@ export function joinRoom(
     throw new ApiError(CODE.NOT_EXISTED, "Mã mời không tồn tại hoặc đã hết hạn");
   }
   const existingMember = roomMembersRepo.findActiveByDevice(deviceId);
+  // Dọn member "xác" cùng tài khoản (cài lại app → device_id mới) trước khi join/xét idempotent.
+  closeStaleSiblingMembers(room.id, userId, deviceId);
   if (existingMember) {
     // Idempotent: device đã ở CHÍNH phòng này (vd tự join lại khi mở lại app) thì
     // xem như đã join — không báo lỗi. Chỉ báo 409 khi device đang ở phòng KHÁC.
