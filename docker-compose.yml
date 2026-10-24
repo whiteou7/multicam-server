@@ -10,7 +10,7 @@ services:
     command: server /data --console-address ":9001"
     ports:
       - "127.0.0.1:${S3_HOST_PORT:-9000}:9000"   # S3 API (Caddy: s3.<domain>)
-      - "127.0.0.1:${S3_CONSOLE_HOST_PORT:-9001}:9001"   # Web console (not proxied)
+      - "${S3_CONSOLE_BIND:-127.0.0.1}:${S3_CONSOLE_HOST_PORT:-9001}:9001"   # Web console (not proxied)
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
