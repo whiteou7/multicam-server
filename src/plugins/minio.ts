@@ -6,7 +6,23 @@ import { env } from "../config/env";
 declare module "fastify" {
   interface FastifyInstance {
     minio: Client;
+    /** Presign-only client signed for the public S3 host. Never use it for server-side calls. */
+    minioPublic: Client;
   }
+}
+
+export function createPublicMinioClient(): Client {
+  const pub = env.minio.publicEndPoint;
+  return new Client({
+    endPoint: pub ?? env.minio.endPoint,
+    port: pub ? env.minio.publicPort : env.minio.port,
+    useSSL: pub ? env.minio.publicUseSSL : env.minio.useSSL,
+    accessKey: env.minio.accessKey,
+    secretKey: env.minio.secretKey,
+    // Explicit region: presigning is pure computation, no region lookup over the network.
+    // shortcut: assumes MinIO's default region, add MINIO_REGION if a region is ever configured.
+    region: "us-east-1",
+  });
 }
 
 export default fp(async function minioPlugin(app: FastifyInstance) {
@@ -25,4 +41,5 @@ export default fp(async function minioPlugin(app: FastifyInstance) {
   }
 
   app.decorate("minio", client);
+  app.decorate("minioPublic", createPublicMinioClient());
 });

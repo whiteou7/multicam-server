@@ -55,15 +55,6 @@ export const roomsRepo = {
       .get(code) as RoomRow | undefined;
   },
 
-  /** Phòng đang mở và được đánh dấu "tìm thấy trên LAN" (join không cần mã mời). */
-  listOpenRooms(): RoomRow[] {
-    return db
-      .prepare(
-        "SELECT * FROM rooms WHERE status = 'open' AND open_for_join = 1 ORDER BY created_at DESC LIMIT 20"
-      )
-      .all() as RoomRow[];
-  },
-
   setOpenForJoin(id: string, open: number): void {
     db.prepare("UPDATE rooms SET open_for_join = ? WHERE id = ?").run(open, id);
   },

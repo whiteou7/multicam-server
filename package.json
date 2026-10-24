@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json && node -e \"require('node:fs').mkdirSync('dist/db',{recursive:true}); require('node:fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\"",
     "start": "node dist/server.js",
     "seed": "tsx src/db/seed.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
@@ -18,7 +19,6 @@
     "@fastify/static": "^7.0.4",
     "@fastify/websocket": "^10.0.1",
     "better-sqlite3": "^11.3.0",
-    "bonjour-service": "^1.4.4",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "fastify-plugin": "^4.5.1",

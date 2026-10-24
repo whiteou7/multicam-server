@@ -6,7 +6,7 @@ Implements the 15/8, 22/8 and 29/8 milestones from
 `specs/v3_GiaoDien_TichHop_API_MultiCamRecorder.md`:
 
 1. Login with 4 default accounts (1 Controller + 3 Remote).
-2. Chunked video upload from a Remote device into MinIO, with resumability and
+2. Video upload from a Remote device straight into MinIO (presigned PUT), with
    dedup, plus enough of the video/download surface for a Controller to list
    and pull clips back — enough to demo the full record → upload → retrieve loop.
 3. Room/invite-code pairing, periodic `sync_device`/`sync_room` polling,
@@ -196,9 +196,9 @@ previous ack response was dropped) so it stops being re-delivered.
 
 ---
 
-### Chunked video upload (Remote uploads a clip → MinIO)
+### Video upload (Remote PUTs the clip straight to MinIO)
 
-Mirrors spec § 2.6.
+Mirrors spec § 2.6. The file bytes never pass through the API: init returns a presigned PUT URL, the client streams the whole file to it, then calls complete.
 
 #### `POST /videos/uploads` 🔒 — `init_upload`
 ```json
@@ -206,10 +206,11 @@ Mirrors spec § 2.6.
   "file_name": "clip1.mp4",
   "file_size": 12582912,
   "mime_type": "video/mp4",
-  "checksum_sha256": "<sha256 of the whole file>",
+  "checksum_sha256": "<optional sha256 of the whole file>",
   "metadata": {
     "local_video_uid": "0f3b9c7e-...",
     "device_id": "device-uuid-or-uid",
+    "room_id": "optional",
     "camera_name": "CamTrai",
     "session_id": "standalone",
     "recorded_at": "2026-08-14T10:00:00Z",
@@ -219,26 +220,24 @@ Mirrors spec § 2.6.
   }
 }
 ```
-- Rejects files over 1 GB (`1006 File size is too big`) or non-`video/mp4` mime types (`1004`).
-- If `(local_video_uid, checksum_sha256)` was already uploaded by this account, returns `already_uploaded: 1` and the existing `video_id` immediately — no new session is opened, matching the "don't re-send 1 GB" rule in the spec.
-- Otherwise returns `upload_id`, `chunk_size` (default 5 MiB, `CHUNK_SIZE_BYTES`), `total_chunks`, and `expires_at` (default 6h, `UPLOAD_SESSION_TTL_MS`).
+- Rejects files over 1 GB (`1006 File size is too big`), non-`video/mp4` mime types (`1004`) and a `file_size` that is not a positive integer (`1004`).
+- `checksum_sha256` is optional and is not verified by the server. Without it, dedup is by `local_video_uid` alone.
+- If `(local_video_uid, checksum_sha256)` was already uploaded by this account, returns `already_uploaded: 1` and the existing `video_id`; `upload_id`/`upload_url`/`expires_at` are `null`.
+- Otherwise returns `{ upload_id, upload_url, expires_at, already_uploaded: 0, video_id: null }`. `upload_url` is valid until `expires_at` (default 6h, `UPLOAD_SESSION_TTL_MS`) and is signed for the public S3 host (`MINIO_PUBLIC_ENDPOINT`, falling back to the internal `MINIO_ENDPOINT`).
 
-#### `PUT /videos/uploads/{upload_id}/chunks/{index}` 🔒 — `upload_chunk`
-- `Content-Type: application/octet-stream`, raw chunk bytes as the body.
-- Optional `chunk-checksum` header (sha256 of that chunk) — if present, mismatches are rejected with `1007 Upload file failed`.
-- Chunks can be sent in any order and re-sent idempotently.
-- Response: `{ chunk_index, received, next_expected_index }` (`next_expected_index: null` once everything has arrived).
-
-#### `GET /videos/uploads/{upload_id}` 🔒 — `get_upload_status`
-Returns `{ upload_id, status, received_chunks: [...], missing_chunks: [...], expires_at }` — poll this after a dropped connection to resume only the missing chunks.
+#### `PUT {upload_url}` (no auth header, goes to MinIO, not the API)
+- Body: the raw file bytes, the whole file in one request. Send `Content-Type: video/mp4`. Do not add an `Authorization` header (the signature is in the query string).
+- Success is HTTP 200 from MinIO (S3 XML error body otherwise). Retrying re-PUTs the whole file to the same URL.
 
 #### `POST /videos/uploads/{upload_id}/complete` 🔒 — `complete_upload`
-- Fails with `1011 Could not publish this post` if any chunk is still missing.
-- Assembles the chunks in order, re-verifies `checksum_sha256` against the whole file (fails with `1007` on mismatch), uploads the result to MinIO at `videos/{user_id}/{device_id}/{session_id}/{video_id}.mp4`, records the `Video`, and cleans up the temp chunk directory.
-- Response: `{ video_id, local_video_uid, url, thumbnail_url, duration_ms, size, created_at }`. `url` is a 1-hour presigned MinIO GET URL. `thumbnail_url` is always `null` for now — thumbnail generation needs `ffmpeg` and isn't implemented in this milestone.
+- Checks the object in MinIO (no re-hashing or copying).
+- `1011` if the object is not in MinIO yet (PUT first, then retry complete; the session stays open).
+- `1007` if the stored size differs from the declared `file_size`; the session is marked `failed`, so start over with a new init.
+- `9992` if the session does not exist, is not yours, expired, or is no longer pending.
+- Response: `{ video_id, local_video_uid, url, thumbnail_url, duration_ms, size, created_at }`. `url` is a 1-hour presigned GET URL on the public host. `thumbnail_url` is always `null` for now.
 
 #### `DELETE /videos/uploads/{upload_id}` 🔒 — `abort_upload`
-Deletes any received chunks and marks the session aborted.
+Marks the session aborted.
 
 ---
 
@@ -456,11 +455,11 @@ Implemented per spec § 1.6 (`src/utils/codes.ts`):
 | 1004 | Invalid parameter value |
 | 1005 | Unknown error |
 | 1006 | File too big (>1 GB video, or role-specific limits) |
-| 1007 | Upload failed (chunk/whole-file checksum mismatch, etc.) |
+| 1007 | Upload failed (uploaded object size differs from `file_size`, etc.) |
 | 1008 | Max items exceeded (e.g. >100 `check_uploaded` items, >50 bulk-delete) |
 | 1009 | Not access (wrong role / not the owner) |
 | 1010 | Already done previously |
-| 1011 | Could not complete (e.g. `complete_upload` with missing chunks) |
+| 1011 | Could not complete (e.g. `complete_upload` before the file was PUT) |
 | 1012 | Limited access (policy restriction) |
 | 9992 | Not existed (also used for unmatched routes) |
 | 9993 | Code verify incorrect |
@@ -484,7 +483,7 @@ Implemented per spec § 1.6 (`src/utils/codes.ts`):
   the server — set it to the server's public IP for anything beyond a LAN
   demo. mediasoup's room/transport state is in-memory only (see the SQLite
   note below), and there's no server-side recording of the live stream —
-  recording still goes through the existing chunked-upload-to-MinIO path.
+  recording still goes through the existing presigned-upload-to-MinIO path.
 - **No real email/SMS provider.** `get_verify_code` generates and stores a
   code and logs it server-side; delivery is out of scope.
 - **`create_share_link`/`revoke_share_link` are not implemented.** They're
@@ -512,7 +511,7 @@ src/
   modules/
     auth/                  login, refresh, logout, password recovery
     devices/                register/list/config/push-token + sync_device
-    videos/                 library CRUD + chunked upload flow
+    videos/                 library CRUD + presigned upload flow
     rooms/                  invite codes, sync_room, recording + camera control
     media/                  mediasoup signaling WS, Router/Transport lifecycle
     recording-sessions/     get_recording_session

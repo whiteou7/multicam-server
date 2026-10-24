@@ -107,7 +107,7 @@ export default async function videosRoutes(app: FastifyInstance): Promise<void> 
       if (request.auth!.accountRole !== "controller" && video.owner_id !== request.auth!.userId) {
         throw new ApiError(CODE.NOT_ACCESS);
       }
-      const url = await app.minio.presignedGetObject(env.minio.bucket, video.object_key, 3600);
+      const url = await app.minioPublic.presignedGetObject(env.minio.bucket, video.object_key, 3600);
       return ok({
         id: video.id,
         name: video.name,
@@ -197,7 +197,7 @@ export default async function videosRoutes(app: FastifyInstance): Promise<void> 
       const video = videosRepo.findById(request.params.video_id);
       if (!video) throw new ApiError(CODE.NOT_EXISTED);
 
-      const download_url = await app.minio.presignedGetObject(
+      const download_url = await app.minioPublic.presignedGetObject(
         env.minio.bucket,
         video.object_key,
         env.upload.downloadUrlTtlSeconds

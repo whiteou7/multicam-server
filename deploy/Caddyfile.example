@@ -1,0 +1,16 @@
+# Paste these blocks into the host Caddy config (e.g. /etc/caddy/Caddyfile),
+# replace the domains, then: sudo systemctl reload caddy
+# Caddy proxies WebSocket upgrades automatically, including the signaling
+# endpoint /it4788/api/v1/rooms/*/media. No extra config needed.
+
+api.example.com {
+	reverse_proxy 127.0.0.1:3000
+}
+
+s3.example.com {
+	# Presigned PUT uploads can be large; no body size limit.
+	request_body {
+		max_size 0
+	}
+	reverse_proxy 127.0.0.1:9000
+}

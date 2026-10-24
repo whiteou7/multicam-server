@@ -55,7 +55,6 @@ video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;bo
 .log{font-family:ui-monospace,SFMono-Regular,'Cascadia Code',Consolas,monospace;font-size:12px;background:#0b1220;color:#67e8f9;
   padding:10px;border-radius:12px;max-height:200px;overflow:auto;white-space:pre-wrap;line-height:1.55}
 </style>
-<script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
 <script type="importmap">
 { "imports": { "mediasoup-client": "/mediasoup-client.bundle.js" } }
 </script>
@@ -73,8 +72,6 @@ video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;bo
     <input id="inpPass" type="password" placeholder="Mật khẩu" value="Controller@123"/>
   </div>
   <div style="margin-top:8px;display:flex;gap:8px">
-    <input id="inpHost" placeholder="Host" value="localhost" style="flex:1"/>
-    <input id="inpPort" placeholder="Port" value="3000" style="width:100px"/>
     <button id="btnLogin">Đăng nhập</button>
   </div>
   <div class="small">Device tự tạo: <span id="devId" class="mono"></span> (Web = 4)</div>
@@ -100,11 +97,6 @@ video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;bo
       <span>Mã mời:<span id="inviteCode" class="codebox"></span></span>
     </div>
 
-    <div class="listTitle">📡 Phòng đang mở trên LAN
-      <button id="btnReloadDiscover" class="ghost" style="margin-left:8px;padding:4px 10px">Quét lại</button>
-    </div>
-    <div id="discoverList" class="small" style="margin-top:6px"></div>
-
     <div class="listTitle">🗂 Phòng của tôi (Controller)
       <button id="btnReloadMine" class="ghost" style="margin-left:8px;padding:4px 10px">Làm mới</button>
     </div>
@@ -112,7 +104,7 @@ video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;bo
 
 <div class="listTitle">🔑 Join bằng mã mời (Remote)</div>
     <div style="margin-top:6px">
-      <span class="small">Remote phone mở app → Quét LAN hoặc tự gõ mã mời → Vào phòng (tự duyệt). Dashboard chỉ quản lý phòng của mình.</span>
+      <span class="small">Remote phone mở app → gõ mã mời → Vào phòng (tự duyệt). Dashboard chỉ quản lý phòng của mình.</span>
     </div>
 
     <div id="members" class="small" style="margin-top:10px"></div>
@@ -140,7 +132,7 @@ video{width:100%;height:auto;max-height:82vh;min-height:320px;background:#000;bo
 
   <div class="card">
     <h3>🧪 API thử nhanh</h3>
-    <div class="small">Base: <span id="apiBase" class="mono"></span> • <a href="/health" target="_blank">/health</a> • <a href="http://localhost:9001" target="_blank">MinIO :9001</a></div>
+    <div class="small">Base: <span id="apiBase" class="mono"></span> • <a href="/health" target="_blank">/health</a></div>
     <div id="apiLog" class="log" style="margin-top:8px"></div>
   </div>
 </div>
@@ -170,14 +162,13 @@ async function getMediasoup(){
 const $ = s => document.querySelector(s);
 const apiLog = (m)=>{ const el=$('#apiLog'); el.textContent += m+'\n'; el.scrollTop=el.scrollHeight; };
 const mLog = (m)=>{ const el=$('#mLog'); el.textContent += new Date().toLocaleTimeString()+' '+m+'\n'; el.scrollTop=el.scrollHeight; };
-let cfg={host:'localhost',port:'3000'}, tokens=null, user=null, deviceId=localStorage.getItem('mc_device_id')||('web_'+Math.random().toString(36).slice(2,8)), roomId=null, syncTimer=null, device=null, recvTr=null, sendTr=null, ws=null, consumers=new Map(); if(!localStorage.getItem('mc_device_id')) localStorage.setItem('mc_device_id', deviceId);
+let tokens=null, user=null, deviceId=localStorage.getItem('mc_device_id')||('web_'+Math.random().toString(36).slice(2,8)), roomId=null, syncTimer=null, device=null, recvTr=null, sendTr=null, ws=null, consumers=new Map(); if(!localStorage.getItem('mc_device_id')) localStorage.setItem('mc_device_id', deviceId);
 
-function base(){ return `http://${cfg.host}:${cfg.port}/it4788/api/v1`; }
+// Served by the API itself, so same-origin relative URLs work behind any proxy/TLS.
+function base(){ return '/it4788/api/v1'; }
 function authH(){ return tokens?{Authorization:`Bearer ${tokens.access_token}`}:{}; }
 $('#devId').textContent=deviceId;
-function setCred(h,p){ cfg.host=h; cfg.port=p; localStorage.setItem('mc_host',h); localStorage.setItem('mc_port',p); $('#apiBase').textContent=base(); }
-setCred(localStorage.getItem('mc_host')||'localhost', localStorage.getItem('mc_port')||'3000');
-$('#inpHost').value=cfg.host; $('#inpPort').value=cfg.port;
+$('#apiBase').textContent=location.origin+base();
 
 async function api(path, opts={}){
   const hasBody = !!opts.body;
@@ -196,19 +187,17 @@ async function api(path, opts={}){
 }
 
 $('#btnLogin').onclick = async()=>{
-  const host=$('#inpHost').value.trim()||'localhost', port=$('#inpPort').value.trim()||'3000';
-  setCred(host,port);
   const phone=$('#inpPhone').value.trim(), password=$('#inpPass').value;
   $('#loginMsg').textContent='Đang đăng nhập...';
   try{
     const data = await api('/auth/login',{method:'POST', headers:{}, body:JSON.stringify({phone,password,device_id:deviceId,device_type:4,device_name:'Web Dashboard'})});
     tokens={access_token:data.access_token,refresh_token:data.refresh_token}; user=data.user; localStorage.setItem('mc_tokens',JSON.stringify(tokens)); localStorage.setItem('mc_user', JSON.stringify({phone:user.phone,role:data.account_role}));
     $('#who').textContent = `${user.phone} • ${data.account_role}`; $('#btnLogout').style.display=''; $('#loginCard').style.display='none'; $('#main').style.display='';
-    apiLog('login ok '+data.account_role); loadVideos(); loadDiscover(); loadMyRooms();
+    apiLog('login ok '+data.account_role); loadVideos(); loadMyRooms();
   }catch(e){ $('#loginMsg').textContent = e.message + (e.code?` (code ${e.code})`: ''); }
 };
 $('#btnLogout').onclick = async()=>{ try{ await api('/auth/logout',{method:'POST'});}catch{} tokens=null; localStorage.removeItem('mc_tokens'); localStorage.removeItem('mc_user'); location.reload(); };
-(function restore(){ const t=localStorage.getItem('mc_tokens'); if(t){ try{ tokens=JSON.parse(t); const u=JSON.parse(localStorage.getItem('mc_user')||'null'); if(u) $('#who').textContent=`${u.phone} • ${u.role}`; $('#loginCard').style.display='none'; $('#main').style.display=''; $('#btnLogout').style.display=''; apiLog('restored token'); loadVideos(); loadDiscover(); loadMyRooms(); }catch{} } })();
+(function restore(){ const t=localStorage.getItem('mc_tokens'); if(t){ try{ tokens=JSON.parse(t); const u=JSON.parse(localStorage.getItem('mc_user')||'null'); if(u) $('#who').textContent=`${u.phone} • ${u.role}`; $('#loginCard').style.display='none'; $('#main').style.display=''; $('#btnLogout').style.display=''; apiLog('restored token'); loadVideos(); loadMyRooms(); }catch{} } })();
 
 async function loadVideos(){
   try{ const d = await api(`/videos?index=0&count=20`); const el=$('#videos'); el.innerHTML = (d.videos||[]).map(v=>`<div class="videoRow"><div><b>${v.name||v.id.slice(0,8)}</b> <span class="small">${v.camera_name||''} • ${new Date(v.created_at).toLocaleString()} • ${(v.size/1024/1024).toFixed(1)}MB</span><br><span class="mono small">${v.id}</span></div><div style="display:flex;gap:6px"><button onclick="playVideo('${v.id}')">▶ Xem</button><button class="secondary" onclick="dlVideo('${v.id}')">⬇ Tải</button></div></div>`).join('')||'<span class="small">Chưa có video</span>'; }catch(e){ apiLog('loadVideos: '+e.message); }
@@ -218,18 +207,7 @@ window.dlVideo = async(id)=>{ try{ const d=await api(`/videos/${id}/download`); 
 $('#btnReloadVideos').onclick=loadVideos;
 
 // Rooms
-// Phòng mở trên LAN — GET /rooms/discover (public), hiển thị ngay sau đăng nhập
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-async function loadDiscover(){
-  const el=$('#discoverList'); el.textContent='Đang tải...';
-  try{
-    const list = await api('/rooms/discover');
-    el.innerHTML = (list&&list.length)
-      ? list.map(r=>`<div class="videoRow"><div style="flex:1"><b>${escapeHtml(r.room_name||r.room_id||'Phòng không tên')}</b> <span class="small">${r.member_count??0}/${r.max_members??'?'} thành viên<br><span class="mono">${escapeHtml(r.invite_code)}</span></span></div>${r.auto_approve?'<span class="pill ok">⏱ vào tự do</span>':'<span class="pill gray">cần duyệt</span>'}</div>`).join('')
-      : '<span class="small">Không có phòng nào đang mở trên LAN</span>';
-  }catch(e){ el.textContent='Lỗi tải phòng: '+e.message; }
-}
-$('#btnReloadDiscover').onclick=loadDiscover;
 // Phòng của tôi — GET /rooms/mine (CRUD phía controller), nút Xóa = hard-delete
 async function loadMyRooms(){
   const el=$('#myRoomsList'); el.textContent='Đang tải...';
@@ -245,7 +223,7 @@ window.deleteMyRoom = async (id)=>{
   try{
     await api('/rooms/'+id,{method:'DELETE'});
     if(roomId===id){ stopRoomSync(); roomId=null; $('#roomId').textContent=''; $('#inviteCode').textContent=''; }
-    loadMyRooms(); loadDiscover(); apiLog('deleted room '+id.slice(0,8));
+    loadMyRooms(); apiLog('deleted room '+id.slice(0,8));
   }catch(e){ alert(e.message);}
 };
 $('#btnReloadMine').onclick=loadMyRooms;
@@ -255,13 +233,13 @@ async function ensureRoom(){
   try{
     const r=await api('/rooms',{method:'POST',body:JSON.stringify({max_members:8,auto_approve:1,open_for_join:1})});
     roomId=r.room_id; $('#roomId').textContent=roomId; $('#inviteCode').textContent=r.invite_code;
-    apiLog('auto-tạo phòng (chưa có) '+roomId+' '+r.invite_code); startRoomSync(); loadDiscover(); loadMyRooms();
+    apiLog('auto-tạo phòng (chưa có) '+roomId+' '+r.invite_code); startRoomSync(); loadMyRooms();
     return true;
   }catch(e){ apiLog('auto-tạo phòng lỗi: '+e.message); alert('Chưa có phòng — tự tạo thất bại: '+e.message); return false; }
 }
-$('#btnCreateRoom').onclick = async()=>{ try{ const r=await api('/rooms',{method:'POST',body:JSON.stringify({max_members:8,auto_approve:1,open_for_join:1})}); roomId=r.room_id; $('#roomId').textContent=roomId; $('#inviteCode').textContent=r.invite_code; apiLog('createRoom '+roomId+' '+r.invite_code); startRoomSync(); loadDiscover(); loadMyRooms(); }catch(e){ alert(e.message);} };
+$('#btnCreateRoom').onclick = async()=>{ try{ const r=await api('/rooms',{method:'POST',body:JSON.stringify({max_members:8,auto_approve:1,open_for_join:1})}); roomId=r.room_id; $('#roomId').textContent=roomId; $('#inviteCode').textContent=r.invite_code; apiLog('createRoom '+roomId+' '+r.invite_code); startRoomSync(); loadMyRooms(); }catch(e){ alert(e.message);} };
 $('#btnRefreshCode').onclick = async()=>{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/invite-code`,{method:'POST'}); $('#inviteCode').textContent=r.invite_code; };
-$('#btnCloseRoom').onclick = async()=>{ if(!(await ensureRoom())) return; await api(`/rooms/${roomId}`,{method:'DELETE'}); stopRoomSync(); roomId=null; $('#roomId').textContent=''; $('#inviteCode').textContent=''; loadDiscover(); loadMyRooms(); };
+$('#btnCloseRoom').onclick = async()=>{ if(!(await ensureRoom())) return; await api(`/rooms/${roomId}`,{method:'DELETE'}); stopRoomSync(); roomId=null; $('#roomId').textContent=''; $('#inviteCode').textContent=''; loadMyRooms(); };
 $('#btnStartRec').onclick = async()=>{ try{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/recording/start`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); const rej=(r.rejected||[]).map(x=>x.member_id.slice(0,6)+':'+x.reason).join(', '); const t=(r.targets||[]).length; apiLog('start OK session='+(r.session_id||'').slice(0,8)+' targets='+t+(r.already_active?' (phiên đang chạy → tái gửi lệnh)':'')+(rej?' | bị loại: '+rej:'')); alert('Đã gửi lệnh bắt đầu ghi tới '+t+' máy'+(r.already_active?' — phiên đang chạy, lệnh được gửi lại':'')+(rej?'\nBị loại: '+rej:'')); }catch(e){ alert('Lỗi: '+(e?.message||String(e))+(e?.code?` [${e.code}]`:'')); } };
 $('#btnStopRec').onclick = async()=>{ try{ if(!(await ensureRoom())) return; const r=await api(`/rooms/${roomId}/recording/stop`,{method:'POST',body:JSON.stringify({target:'all',client_command_id:'cmd_'+Date.now()})}); const n=(r.results||[]).length; apiLog('stop OK session='+(r.session_id||'').slice(0,8)+' stoppers='+n); alert('Đã gửi lệnh dừng tới '+n+' máy — chờ phone finalize & upload vào Videos'); }catch(e){ alert('Lỗi: '+(e?.message||String(e))+(e?.code?` [${e.code}]`:'')); } };
 function startRoomSync(){ stopRoomSync(); let rev=0; async function tick(){ if(!roomId) return; try{ const d=await api(`/rooms/${roomId}/sync?since=${rev}`); rev=d.revision; $('#rev').textContent=rev; $('#nextSync').textContent=d.next_sync_in; $('#members').innerHTML = (d.members||[]).map(m=>`${m.camera_name||'?'} <span class="mono">${[m.device_name,m.device_model].filter(Boolean).join(' · ')||'?'}</span> <span class="mono small">${m.device_short_id||m.device_id.slice(0,8)}</span> online=${m.is_online} rec=${m.recording_state} <button onclick="setCam('${m.member_id}')">flash</button>`).join('<br>')||'no members'; }catch(e){ apiLog('syncRoom '+e.message);} syncTimer=setTimeout(tick, 4000); } tick(); }
@@ -274,7 +252,7 @@ $('#btnProduce').onclick = async()=>{
   if(!(await ensureRoom())) return;
   try{
     const tok = await api(`/rooms/${roomId}/preview-token`,{method:'POST',body:JSON.stringify({quality:'low',protocol:'webrtc'})});
-    const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+cfg.host+':'+cfg.port+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
+    const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
     mLog('produce: connect '+wsUrl); const ws2=new WebSocket(wsUrl);
     // reuse same logic as preview but produce
     localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
@@ -324,7 +302,7 @@ async function startPreview(){
   clearPreviewInfra();
   previewOn=true; setPreviewUI();
   const tok = await api(`/rooms/${roomId}/preview-token`,{method:'POST',body:JSON.stringify({quality:'low',protocol:'webrtc'})});
-  const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+cfg.host+':'+cfg.port+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
+  const wsUrl = (location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+ tok.signaling_url + '?token='+encodeURIComponent(tokens.access_token);
   mLog('preview: '+wsUrl);
   ws = new WebSocket(wsUrl);
   let reqId=0, pending=new Map(), msgsReady=false, buf=[];
@@ -449,11 +427,7 @@ $('#btnPreview').onclick = async ()=>{
 // Fallback login handler (chạy cả khi type="module" lỗi) — đảm bảo bấm Đăng nhập luôn gọi API
 (function(){
   function fallbackBase(){
-    try{
-      const h = (document.getElementById('inpHost')?.value||localStorage.getItem('mc_host')||'localhost').trim()||'localhost';
-      const p = (document.getElementById('inpPort')?.value||localStorage.getItem('mc_port')||'3000').trim()||'3000';
-      return 'http://'+h+':'+p+'/it4788/api/v1';
-    }catch{ return 'http://localhost:3000/it4788/api/v1'; }
+    return '/it4788/api/v1';
   }
   document.addEventListener('DOMContentLoaded', ()=>{
     const btn=document.getElementById('btnLogin');
@@ -465,10 +439,8 @@ $('#btnPreview').onclick = async ()=>{
   window.fallbackLogin = async()=>{
     const phone=document.getElementById('inpPhone')?.value.trim();
     const password=document.getElementById('inpPass')?.value;
-    const host=document.getElementById('inpHost')?.value.trim()||'localhost';
-    const port=document.getElementById('inpPort')?.value.trim()||'3000';
     const devId = localStorage.getItem('mc_device_id')||('web_'+Math.random().toString(36).slice(2,8));
-    console.log('fallbackLogin', {phone, host, port, devId, base: fallbackBase()});
+    console.log('fallbackLogin', {phone, devId, base: fallbackBase()});
     const res=await fetch(fallbackBase()+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone,password,device_id:devId,device_type:4,device_name:'Web Dashboard'})});
     const j=await res.json();
     console.log('fallbackLogin result', j);

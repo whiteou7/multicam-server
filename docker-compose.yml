@@ -1,10 +1,16 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2024-10-29T16-01-48Z
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web console
+      - "127.0.0.1:9000:9000"   # S3 API (Caddy: s3.<domain>)
+      - "127.0.0.1:9001:9001"   # Web console (not proxied)
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
@@ -12,37 +18,45 @@ services:
       - minio-data:/data
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    logging: *logging
 
   backend:
+    image: ghcr.io/whiteou7/multicam-server:${TAG:-latest}
     build: .
     ports:
-      - "0.0.0.0:3000:3000"
-      - "0.0.0.0:40100-40199:40100-40199/udp"
-      - "0.0.0.0:40100-40199:40100-40199/tcp"
+      - "127.0.0.1:3000:3000"   # API (Caddy: api.<domain>)
+      - "${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}:${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}/udp"
+      - "${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}:${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}/tcp"
     environment:
       PORT: 3000
       HOST: 0.0.0.0
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       DATABASE_PATH: /app/data/multicam.sqlite3
-      UPLOAD_TMP_DIR: /app/data/upload-tmp
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
       MINIO_USE_SSL: "false"
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-multicam-videos}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
+      MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-}
+      MINIO_PUBLIC_USE_SSL: ${MINIO_PUBLIC_USE_SSL:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       MEDIASOUP_LISTEN_IP: 0.0.0.0
-      MEDIASOUP_ANNOUNCED_IP: ${MEDIASOUP_ANNOUNCED_IP:-192.168.1.6}
-      MEDIASOUP_RTC_MIN_PORT: 40100
-      MEDIASOUP_RTC_MAX_PORT: 40199
+      MEDIASOUP_ANNOUNCED_IP: ${MEDIASOUP_ANNOUNCED_IP:?set to the VM public IP}
+      MEDIASOUP_RTC_MIN_PORT: ${MEDIASOUP_RTC_MIN_PORT:-40100}
+      MEDIASOUP_RTC_MAX_PORT: ${MEDIASOUP_RTC_MAX_PORT:-40199}
     volumes:
       - backend-data:/app/data
     depends_on:
       minio:
         condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
 
 volumes:
   minio-data:

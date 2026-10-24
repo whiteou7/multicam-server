@@ -69,23 +69,12 @@ CREATE TABLE IF NOT EXISTS uploads (
   file_name TEXT NOT NULL,
   file_size INTEGER NOT NULL,
   mime_type TEXT NOT NULL,
-  checksum_sha256 TEXT NOT NULL,
-  chunk_size INTEGER NOT NULL,
-  total_chunks INTEGER NOT NULL,
+  checksum_sha256 TEXT NOT NULL, -- '' when the client sent none
+  object_key TEXT NOT NULL, -- MinIO key the client PUTs to via the presigned URL
   metadata_json TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending', -- pending | completed | aborted | expired
-  tmp_dir TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', -- pending | completed | aborted | expired | failed
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE TABLE IF NOT EXISTS upload_chunks (
-  upload_id TEXT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
-  chunk_index INTEGER NOT NULL,
-  received_bytes INTEGER NOT NULL,
-  checksum TEXT,
-  received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  PRIMARY KEY (upload_id, chunk_index)
 );
 
 -- Room/session control (spec § 2.8-2.9): a Controller creates a room with an
@@ -101,8 +90,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   max_members INTEGER NOT NULL DEFAULT 8,
   -- 1 = auto-approve join (default), 0 = owner must approve each joiner
   auto_approve INTEGER NOT NULL DEFAULT 1,
-  -- 1 = phòng mở "tìm thấy trên LAN" (không cần nhập mã, được quảng bá qua
-  -- mDNS/UDP discovery); 0 = phòng mặc định, chỉ join bằng mã mời.
+  -- 1 = phòng không hết hạn mã mời; 0 = mã mời hết hạn theo invite_code_expires_at.
   open_for_join INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'open', -- open | closed
   session_id TEXT, -- current active recording_sessions.id, if recording

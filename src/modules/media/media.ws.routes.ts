@@ -14,7 +14,6 @@ import {
   sendToSocket,
 } from "./media.service";
 import { MemberMedia } from "./media.state";
-import { recorderService } from "./recorder";
 
 const CONTROLLER_PARTICIPANT_ID = "controller";
 
@@ -67,7 +66,7 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
       // controller luôn mở được recv transport (preview/xem) bất kỳ phòng nào,
       // tài khoản remote chỉ mở được send transport (phát). Trước đây dựa vào
       // owner_id khiến dashboard/login bằng controller@ mà join phòng của user
-      // khác (vd phòng chung của default-room@) bị coi là remote → báo lỗi
+      // khác (vd phòng của controller khác) bị coi là remote → báo lỗi
       // "a remote may only open a send transport".
       if (auth.accountRole === "controller") {
         role = "controller";
@@ -116,11 +115,8 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               }
               // Một remote chỉ dùng MỘT send transport cho mỗi lần phát sóng. Khi
               // bật lại phát sóng, client đã đóng transport cũ nhưng server chỉ biết
-              // khi DTLS chuyển "closed" (trễ vài giây) — trong khoảng trễ đó recorder
-              // cũ vẫn chạy nên producer MỚI bị rơi vào nhánh "skip late stream" ⇒
-              // mất bản ghi (triệu chứng quay nhiều máy chỉ được N-1). Đóng dứt khoát
-              // transport cũ CÙNG HƯỚNG ngay khi mở transport mới để recorder cũ
-              // finalize trước khi producer mới xuất hiện.
+              // khi DTLS chuyển "closed" (trễ vài giây). Đóng dứt khoát transport cũ
+              // CÙNG HƯỚNG ngay khi mở transport mới để producer cũ không tồn tại song song.
               if (role === "remote") {
                 for (const [id, t] of [...member.transports]) {
                   if (transportDirs.get(id) !== direction) continue;
@@ -187,10 +183,6 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                 kind: producer.kind,
                 ...memberLabel(participantId),
               });
-              // Ghi lại broadcast ngay trên server (mỗi remote 1 file MP4 khi dừng phát)
-              recorderService
-                .start(app, roomMedia, room.id, participantId, producer)
-                .catch((err: unknown) => request.log.error({ err }, "recorder start failed"));
               break;
             }
 
