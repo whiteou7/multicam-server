@@ -9,8 +9,8 @@ services:
     image: quay.io/minio/minio:RELEASE.2024-10-29T16-01-48Z
     command: server /data --console-address ":9001"
     ports:
-      - "127.0.0.1:9000:9000"   # S3 API (Caddy: s3.<domain>)
-      - "127.0.0.1:9001:9001"   # Web console (not proxied)
+      - "127.0.0.1:${S3_HOST_PORT:-9000}:9000"   # S3 API (Caddy: s3.<domain>)
+      - "127.0.0.1:${S3_CONSOLE_HOST_PORT:-9001}:9001"   # Web console (not proxied)
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
@@ -28,7 +28,7 @@ services:
     image: ghcr.io/whiteou7/multicam-server:${TAG:-latest}
     build: .
     ports:
-      - "127.0.0.1:3000:3000"   # API (Caddy: api.<domain>)
+      - "127.0.0.1:${API_HOST_PORT:-3000}:3000"   # API (Caddy: api.<domain>)
       - "${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}:${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}/udp"
       - "${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}:${MEDIASOUP_RTC_MIN_PORT:-40100}-${MEDIASOUP_RTC_MAX_PORT:-40199}/tcp"
     environment:
