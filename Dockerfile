@@ -10,12 +10,12 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 RUN npm ci
 
-COPY tsconfig.json ./
+COPY tsconfig.json vite.config.ts ./
 COPY src ./src
-COPY public ./public
-# No fallback: a failed dashboard bundle must fail the build.
-RUN npx esbuild node_modules/mediasoup-client/lib/index.js --bundle --format=esm --outfile=public/mediasoup-client.bundle.js --platform=browser
+COPY web ./web
 RUN npm run build
+# No fallback: a failed dashboard build (typecheck included) must fail the image build.
+RUN npm run build:web
 # Keep the already-compiled native modules, drop dev deps.
 RUN npm prune --omit=dev
 

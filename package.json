@@ -9,6 +9,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json && node -e \"require('node:fs').mkdirSync('dist/db',{recursive:true}); require('node:fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\"",
     "start": "node dist/server.js",
+    "dev:web": "vite",
+    "build:web": "vue-tsc --noEmit -p web/tsconfig.json && vite build",
     "seed": "tsx src/db/seed.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts"
@@ -23,14 +25,17 @@
     "fastify": "^4.28.1",
     "fastify-plugin": "^4.5.1",
     "mediasoup": "^3.26.0",
-    "mediasoup-client": "^3.23.1",
     "minio": "^8.0.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20.14.9",
-    "esbuild": "^0.28.2",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "mediasoup-client": "^3.23.1",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.3"
+    "typescript": "^5.5.3",
+    "vite": "^6.4.5",
+    "vue": "^3.5.44",
+    "vue-tsc": "^2.2.12"
   }
 }

@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import Fastify, { FastifyInstance } from "fastify";
 import { ApiError, CODE, MESSAGE } from "./utils/codes";
@@ -22,7 +23,19 @@ export const API_PREFIX = "/it4788/api/v1";
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: true,
+    logger: {
+      serializers: {
+        // Same fields as Fastify's default, but the dashboard passes the JWT as ?token=
+        // (browsers cannot set WS headers), so keep it out of the logs.
+        req: (req) => ({
+          method: req.method,
+          url: req.url?.replace(/([?&]token=)[^&]*/g, "$1[redacted]"),
+          hostname: req.hostname,
+          remoteAddress: req.ip,
+          remotePort: req.socket?.remotePort,
+        }),
+      },
+    },
     // Video bytes go straight to MinIO, so API requests are small JSON.
     // Keep-alive outlives Caddy's 2 min upstream idle so the proxy never reuses a closed socket.
     // connectionTimeout stays 0: it would also cut idle signaling WebSockets.
@@ -47,16 +60,17 @@ export async function buildApp(): Promise<FastifyInstance> {
       .send({ code: CODE.EXCEPTION_ERROR, message: MESSAGE[CODE.EXCEPTION_ERROR], data: {} });
   });
 
-  // dashboard web cho Chrome — http://localhost:PORT/
-  app.get("/", async (_req, reply) => {
-    const fs = await import("fs");
-    const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
-    return reply.type("text/html").send(html);
-  });
-  app.get("/mediasoup-client.bundle.js", async (_req, reply) => {
-    const fs = await import("fs");
-    const js = fs.readFileSync(path.join(__dirname, "../public/mediasoup-client.bundle.js"), "utf8");
-    return reply.type("application/javascript").send(js);
+  // Dashboard (built from web/ by `npm run build:web`) — http://localhost:PORT/
+  await app.register(fastifyStatic, {
+    root: path.join(__dirname, "../public"),
+    cacheControl: false,
+    // Vite hashes everything under /assets, so it can be cached forever; index.html must not be.
+    setHeaders: (res, filePath) => {
+      res.setHeader(
+        "Cache-Control",
+        filePath.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache"
+      );
+    },
   });
 
   app.get("/health", async (request, reply) => {

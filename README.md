@@ -58,9 +58,13 @@ Set in `.env` (read by compose). Full list with comments: `.env.example`.
 ## Local dev
 
 ```bash
-cp .env.example .env && npm ci && npm run dev    # needs MinIO on localhost:9000
+cp .env.example .env && npm ci && npm run dev    # API on :3000, needs MinIO on localhost:9000
+npm run dev:web                                   # dashboard on :5173 (Vite), proxies /it4788 and /health to :3000
 npm run typecheck
+npm run build:web                                 # typechecks web/ and builds it into public/
 ```
+
+The dashboard source is in `web/` (Vue 3 + Vite). `public/` is generated output and is not committed; the API serves it at `/` once built (the Docker image builds it).
 
 ## Known gaps
 
