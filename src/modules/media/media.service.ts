@@ -19,6 +19,11 @@ export function registerMember(room: RoomMedia, memberId: string, socket: Member
   const existing = room.members.get(memberId);
   if (existing) {
     closeMember(existing);
+    // Otherwise the old socket stays open forever with dead media. Its later close
+    // event is ignored by closeMemberMedia because it no longer owns the member.
+    if (existing.socket !== socket && existing.socket.readyState === existing.socket.OPEN) {
+      existing.socket.close(4001, "replaced");
+    }
   }
   const member: MemberMedia = {
     memberId,
@@ -53,11 +58,14 @@ function closeMember(member: MemberMedia): void {
 // Called when a Remote/Controller leaves a room (leave, kick, or socket
 // close) — tears down its transports and tells every other member in the
 // room that its producers are gone so grid tiles can drop the feed.
-export function closeMemberMedia(roomId: string, memberId: string): void {
+// A socket close passes its own socket as onlySocket, so a late close of a
+// replaced socket cannot destroy the member that replaced it.
+export function closeMemberMedia(roomId: string, memberId: string, onlySocket?: MemberMedia["socket"]): void {
   const room = mediaState.getRoom(roomId);
   if (!room) return;
   const member = room.members.get(memberId);
   if (!member) return;
+  if (onlySocket && member.socket !== onlySocket) return;
 
   const producerIds = [...member.producers.keys()];
   closeMember(member);

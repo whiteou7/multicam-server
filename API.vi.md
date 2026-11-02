@@ -6,8 +6,8 @@ Bản này hiện thực các mốc 15/8, 22/8 và 29/8 trong
 `specs/v3_GiaoDien_TichHop_API_MultiCamRecorder.md`:
 
 1. Đăng nhập với 4 tài khoản mặc định (1 Controller + 3 Remote).
-2. Upload video dạng chunk từ máy Remote lên MinIO, hỗ trợ tiếp tục upload dở
-   dang và chống trùng, kèm đủ phần thư viện/tải xuống để máy Controller liệt
+2. Upload video từ máy Remote thẳng lên MinIO (URL PUT có chữ ký), hỗ trợ
+   chống trùng, kèm đủ phần thư viện/tải xuống để máy Controller liệt
    kê và tải clip về — đủ để demo trọn luồng quay → upload → lấy về.
 3. Ghép phòng qua mã mời, đồng bộ định kỳ `sync_device`/`sync_room`, điều
    khiển quay (bắt đầu/dừng đồng thời toàn bộ máy Remote trong phòng), và
@@ -196,9 +196,9 @@ phản hồi ack trước đó bị rớt mạng) để không bị gửi lại 
 
 ---
 
-### Upload video theo chunk (máy Remote gửi clip → MinIO)
+### Upload video (máy Remote PUT clip thẳng lên MinIO)
 
-Tương ứng mục 2.6 của đặc tả.
+Tương ứng mục 2.6 của đặc tả. Dữ liệu file không đi qua API: init trả về URL PUT có chữ ký, client gửi cả file lên URL đó rồi gọi complete.
 
 #### `POST /videos/uploads` 🔒 — `init_upload`
 ```json
@@ -206,7 +206,7 @@ Tương ứng mục 2.6 của đặc tả.
   "file_name": "clip1.mp4",
   "file_size": 12582912,
   "mime_type": "video/mp4",
-  "checksum_sha256": "<sha256 của toàn bộ file>",
+  "checksum_sha256": "<tùy chọn: sha256 của toàn bộ file>",
   "metadata": {
     "local_video_uid": "0f3b9c7e-...",
     "device_id": "device-uuid-or-uid",
@@ -221,24 +221,19 @@ Tương ứng mục 2.6 của đặc tả.
 ```
 - Từ chối file vượt quá 1 GB (`1006 File size is too big`) hoặc không phải mime type `video/mp4` (`1004`).
 - Nếu cặp `(local_video_uid, checksum_sha256)` đã được chính tài khoản này upload trước đó, trả về ngay `already_uploaded: 1` kèm `video_id` cũ — không mở phiên upload mới, đúng theo quy tắc "không truyền lại 1 GB dữ liệu" trong đặc tả.
-- Ngược lại trả về `upload_id`, `chunk_size` (mặc định 5 MiB, `CHUNK_SIZE_BYTES`), `total_chunks`, và `expires_at` (mặc định 6 giờ, `UPLOAD_SESSION_TTL_MS`).
+- `checksum_sha256` là tùy chọn, server không kiểm tra; nếu bỏ trống thì chống trùng chỉ theo `local_video_uid`. `file_size` phải là số nguyên dương (`1004`).
+- Ngược lại trả về `{ upload_id, upload_url, expires_at, already_uploaded: 0, video_id: null }`. `upload_url` hết hạn tại `expires_at` (mặc định 6 giờ, `UPLOAD_SESSION_TTL_MS`), ký cho host S3 công khai (`MINIO_PUBLIC_ENDPOINT`, mặc định dùng `MINIO_ENDPOINT`).
 
-#### `PUT /videos/uploads/{upload_id}/chunks/{index}` 🔒 — `upload_chunk`
-- `Content-Type: application/octet-stream`, body là dữ liệu nhị phân thô của mảnh.
-- Header `chunk-checksum` (sha256 của riêng mảnh đó) là tùy chọn — nếu có mà sai thì bị từ chối với mã `1007 Upload file failed`.
-- Các mảnh có thể gửi theo bất kỳ thứ tự nào và gửi lại nhiều lần vẫn an toàn (idempotent).
-- Phản hồi: `{ chunk_index, received, next_expected_index }` (`next_expected_index: null` khi đã nhận đủ toàn bộ).
-
-#### `GET /videos/uploads/{upload_id}` 🔒 — `get_upload_status`
-Trả về `{ upload_id, status, received_chunks: [...], missing_chunks: [...], expires_at }` — gọi API này sau khi mất kết nối để biết cần gửi lại đúng những mảnh nào.
+#### `PUT {upload_url}` (gửi thẳng tới MinIO, không kèm header Authorization)
+- Body là toàn bộ file nhị phân trong một request, `Content-Type: video/mp4`. MinIO trả HTTP 200 khi thành công. Thử lại = PUT lại cả file vào cùng URL.
 
 #### `POST /videos/uploads/{upload_id}/complete` 🔒 — `complete_upload`
-- Báo lỗi `1011 Could not publish this post` nếu còn thiếu mảnh nào.
-- Ghép các mảnh theo đúng thứ tự, đối chiếu lại `checksum_sha256` với toàn bộ file (lỗi `1007` nếu sai), tải kết quả lên MinIO tại đường dẫn `videos/{user_id}/{device_id}/{session_id}/{video_id}.mp4`, ghi bản ghi `Video`, rồi dọn thư mục chunk tạm.
-- Phản hồi: `{ video_id, local_video_uid, url, thumbnail_url, duration_ms, size, created_at }`. `url` là link phát trực tiếp có chữ ký của MinIO, hạn 1 giờ. `thumbnail_url` hiện luôn là `null` — việc sinh thumbnail cần `ffmpeg` và chưa được cài đặt trong mốc này.
+- Chỉ kiểm tra object trên MinIO (không ghép, không băm lại).
+- `1011` nếu file chưa được PUT lên (PUT rồi gọi lại complete). `1007` nếu kích thước khác `file_size` (phiên chuyển sang `failed`, phải init lại). `9992` nếu phiên không tồn tại, hết hạn hoặc không còn `pending`.
+- Phản hồi: `{ video_id, local_video_uid, url, thumbnail_url, duration_ms, size, created_at }`. `url` là link phát trực tiếp có chữ ký của MinIO, hạn 1 giờ. `thumbnail_url` hiện luôn là `null` (chưa sinh thumbnail).
 
 #### `DELETE /videos/uploads/{upload_id}` 🔒 — `abort_upload`
-Xóa các mảnh đã nhận và đánh dấu phiên upload là đã hủy.
+Đánh dấu phiên upload là đã hủy.
 
 ---
 
@@ -456,11 +451,11 @@ Cài đặt đúng theo mục 1.6 của đặc tả (`src/utils/codes.ts`):
 | 1004 | Sai giá trị tham số |
 | 1005 | Lỗi không xác định |
 | 1006 | File quá lớn (video vượt 1 GB, hoặc giới hạn riêng theo vai trò) |
-| 1007 | Upload thất bại (sai checksum của mảnh/toàn file, v.v.) |
+| 1007 | Upload thất bại (kích thước object khác `file_size`, v.v.) |
 | 1008 | Vượt giới hạn số lượng (ví dụ >100 phần tử `check_uploaded`, >50 khi xóa hàng loạt) |
 | 1009 | Không có quyền (sai vai trò / không phải chủ sở hữu) |
 | 1010 | Hành động đã thực hiện trước đó |
-| 1011 | Không thể hoàn tất (ví dụ `complete_upload` khi còn thiếu mảnh) |
+| 1011 | Không thể hoàn tất (ví dụ `complete_upload` khi file chưa được PUT) |
 | 1012 | Bị giới hạn theo chính sách |
 | 9992 | Không tồn tại (cũng dùng cho route không khớp) |
 | 9993 | Mã xác thực sai |
@@ -485,7 +480,7 @@ Cài đặt đúng theo mục 1.6 của đặc tả (`src/utils/codes.ts`):
   với server — cần đặt biến này thành IP public của server nếu triển khai
   ngoài phạm vi demo LAN. Trạng thái room/transport của mediasoup chỉ nằm
   trong bộ nhớ (xem ghi chú SQLite bên dưới), và chưa ghi lại luồng xem trực
-  tiếp phía server — việc quay/lưu clip vẫn đi theo đường upload chunk lên
+  tiếp phía server — việc quay/lưu clip vẫn đi theo đường upload có chữ ký lên
   MinIO như cũ.
 - **Chưa tích hợp nhà cung cấp email/SMS thật.** `get_verify_code` sinh và
   lưu mã, rồi ghi log ở server; việc gửi thật nằm ngoài phạm vi mốc này.
@@ -516,7 +511,7 @@ src/
   modules/
     auth/                  Đăng nhập, làm mới token, đăng xuất, khôi phục mật khẩu
     devices/                Đăng ký/liệt kê/cấu hình/push-token thiết bị + sync_device
-    videos/                 CRUD thư viện + luồng upload theo chunk
+    videos/                 CRUD thư viện + luồng upload có chữ ký
     rooms/                  Mã mời, sync_room, điều khiển quay + camera
     media/                  WebSocket báo hiệu mediasoup, vòng đời Router/Transport
     recording-sessions/     get_recording_session

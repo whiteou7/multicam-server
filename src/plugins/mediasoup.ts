@@ -32,6 +32,7 @@ declare module "fastify" {
   interface FastifyInstance {
     mediasoup: {
       getWorker(): Worker;
+      alive(): boolean;
     };
   }
 }
@@ -58,6 +59,7 @@ export default fp(async function mediasoupPlugin(app: FastifyInstance) {
       nextWorker = (nextWorker + 1) % workers.length;
       return worker;
     },
+    alive: () => workers.length > 0 && workers.every((w) => !w.closed),
   });
 
   app.addHook("onClose", async () => {

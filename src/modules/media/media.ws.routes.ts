@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { authenticate } from "../../middleware/authenticate";
@@ -14,9 +15,11 @@ import {
   sendToSocket,
 } from "./media.service";
 import { MemberMedia } from "./media.state";
-import { recorderService } from "./recorder";
 
-const CONTROLLER_PARTICIPANT_ID = "controller";
+// Only pings reveal half-open sockets (e.g. a phone that lost its network).
+const PING_INTERVAL_MS = 20_000;
+// The preview budget is ~300 kbps, so the keyframe pump only covers the first seconds of a consumer.
+const KEYFRAME_PUMP_TICKS = 10;
 
 type Role = "controller" | "remote";
 
@@ -67,11 +70,12 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
       // controller luôn mở được recv transport (preview/xem) bất kỳ phòng nào,
       // tài khoản remote chỉ mở được send transport (phát). Trước đây dựa vào
       // owner_id khiến dashboard/login bằng controller@ mà join phòng của user
-      // khác (vd phòng chung của default-room@) bị coi là remote → báo lỗi
+      // khác (vd phòng của controller khác) bị coi là remote → báo lỗi
       // "a remote may only open a send transport".
       if (auth.accountRole === "controller") {
         role = "controller";
-        participantId = CONTROLLER_PARTICIPANT_ID;
+        // One id per connection: a shared id let a second viewer kill the first.
+        participantId = `controller:${randomUUID()}`;
       } else {
         const member = roomMembersRepo.findActiveByRoomAndDevice(room.id, auth.deviceId);
         if (!member || member.user_id !== auth.userId) {
@@ -85,6 +89,8 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
 
       const roomMedia = await getOrCreateRoomMedia(app, room.id);
       const member: MemberMedia = registerMember(roomMedia, participantId, socket);
+      const logCtx = { room: room.id, role, participant: participantId };
+      request.log.info(logCtx, "media ws open");
       // Hướng của từng transport (send/recv) — cần để dọn transport cũ cùng hướng.
       const transportDirs = new Map<string, string>();
 
@@ -116,11 +122,8 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               }
               // Một remote chỉ dùng MỘT send transport cho mỗi lần phát sóng. Khi
               // bật lại phát sóng, client đã đóng transport cũ nhưng server chỉ biết
-              // khi DTLS chuyển "closed" (trễ vài giây) — trong khoảng trễ đó recorder
-              // cũ vẫn chạy nên producer MỚI bị rơi vào nhánh "skip late stream" ⇒
-              // mất bản ghi (triệu chứng quay nhiều máy chỉ được N-1). Đóng dứt khoát
-              // transport cũ CÙNG HƯỚNG ngay khi mở transport mới để recorder cũ
-              // finalize trước khi producer mới xuất hiện.
+              // khi DTLS chuyển "closed" (trễ vài giây). Đóng dứt khoát transport cũ
+              // CÙNG HƯỚNG ngay khi mở transport mới để producer cũ không tồn tại song song.
               if (role === "remote") {
                 for (const [id, t] of [...member.transports]) {
                   if (transportDirs.get(id) !== direction) continue;
@@ -139,7 +142,15 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               member.transports.set(transport.id, transport);
               transportDirs.set(transport.id, direction);
               transport.on("dtlsstatechange", (state) => {
+                request.log.info({ ...logCtx, transport: transport.id, state }, "transport dtlsstatechange");
                 if (state === "closed") transport.close();
+              });
+              transport.on("icestatechange", (state) => {
+                request.log.info({ ...logCtx, transport: transport.id, state }, "transport icestatechange");
+                // Lets a viewer show "signal lost" while the producer is still listed.
+                if (role === "remote") {
+                  broadcastToOthers(room.id, participantId, { type: "member-state", member_id: participantId, ice_state: state });
+                }
               });
               send(socket, {
                 type: "transport-created",
@@ -187,10 +198,6 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                 kind: producer.kind,
                 ...memberLabel(participantId),
               });
-              // Ghi lại broadcast ngay trên server (mỗi remote 1 file MP4 khi dừng phát)
-              recorderService
-                .start(app, roomMedia, room.id, participantId, producer)
-                .catch((err: unknown) => request.log.error({ err }, "recorder start failed"));
               break;
             }
 
@@ -221,12 +228,13 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
               });
               // Keyframe PUMP: mediasoup chỉ đẩy delta frame về consumer mới có — nếu PLI đầu
               // bị rơi lúc SRTP/DTLS còn đang khởi tạo (nhất là "bật preview trước, phone phát
-              // sau") thì consumer treo mãi. Pump 1s/1 lần tới khi consumer đóng ⇒ controller
-              // bao giờ cũng nhận được keyframe → video tự hiện, KHÔNG phụ thuộc thứ tự.
+              // sau") thì consumer treo mãi. Pump 1s/1 lần nhưng chỉ KEYFRAME_PUMP_TICKS nhịp đầu
+              // (băng thông preview rất thấp); sau đó dựa vào burst của resume-consumer.
               if (consumer.kind === "video") {
                 void consumer.requestKeyFrame().catch(() => undefined);
+                let ticks = 0;
                 const pump = setInterval(() => {
-                  if (consumer.closed) {
+                  if (consumer.closed || ++ticks > KEYFRAME_PUMP_TICKS) {
                     clearInterval(pump);
                     return;
                   }
@@ -272,14 +280,23 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
                 .filter(([id]) => id !== participantId)
                 .flatMap(([memberId, m]) => {
                   const label = memberLabel(memberId);
+                  // A remote only has send transports, so any one carries the stream's ICE state.
+                  const iceState = [...m.transports.values()][0]?.iceState ?? "new";
                   return [...m.producers.values()].map((p) => ({
                     member_id: memberId,
                     producer_id: p.id,
                     kind: p.kind,
+                    ice_state: iceState,
                     ...label,
                   }));
                 });
               send(socket, { type: "producers", request_id: msg.request_id ?? null, producers: list });
+              break;
+            }
+
+            // Lets a client detect a half-open socket: WS ping frames are invisible to app code.
+            case "ping": {
+              send(socket, { type: "pong", request_id: msg.request_id ?? null });
               break;
             }
 
@@ -291,7 +308,26 @@ export default async function mediaWsRoutes(app: FastifyInstance): Promise<void>
         }
       });
 
-      socket.on("close", () => closeMemberMedia(room.id, participantId));
+      let alive = true;
+      socket.on("pong", () => {
+        alive = true;
+      });
+      const pinger = setInterval(() => {
+        if (!alive) {
+          request.log.warn(logCtx, "media ws ping timeout, terminating");
+          socket.terminate();
+          return;
+        }
+        alive = false;
+        socket.ping();
+      }, PING_INTERVAL_MS);
+
+      socket.on("close", (code: number, reason: Buffer) => {
+        clearInterval(pinger);
+        request.log.info({ ...logCtx, code, reason: reason.toString() }, "media ws close");
+        // Only tears down if this socket still owns the member (see registerMember).
+        closeMemberMedia(room.id, participantId, socket);
+      });
       socket.on("error", (err: Error) => request.log.error(err, "media ws error"));
     }
   );

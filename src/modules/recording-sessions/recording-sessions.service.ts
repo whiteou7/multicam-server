@@ -7,7 +7,7 @@
  * để admin/người dùng mở MinIO Object Browser nhìn vào folder phiên là có
  * ngay thông tin phiên (ngày giờ, thiết bị nào tham gia, model máy, camera name...).
  *
- * Cấu trúc folder trên MinIO theo yêu cầu mới (chung cả 2 luồng server-ghi / client-upload
+ * Cấu trúc folder trên MinIO theo yêu cầu mới (client-upload
  * đều đẩy MP4 vào cùng folder):
  *   {room_id} / {session_id}_{YYYYMMDD_HHmmss (VN time)} /
  *     session.json
@@ -27,7 +27,7 @@ import { buildSessionFolderName, buildSessionJsonObjectKey } from "../../utils/v
 /**
  * Tên folder phiên trên MinIO — resolve duy nhất từ `recording_sessions.started_at`.
  *
- * Mọi nơi tạo object key (session.json, MP4 ghi trên server, MP4 upload từ client)
+ * Mọi nơi tạo object key (session.json, MP4 upload từ client)
  * PHẢI gọi hàm này. Nếu tự dựng tên folder từ thời điểm ghi (`rec.startedAt` /
  * `recorded_at`) thì lệch vài giây với `session.json` → tách 2 folder.
  *
@@ -244,7 +244,6 @@ export function finalizeSessionToMinIOBackground(
     try {
       app.log.info({ sessionId, opId, label }, `${label} queue started`);
       // Đợi 1 giây để stopRecord lệnh cuối cùng kịp ghi trạng thái final vào DB
-      // (recorder ffmpeg finalize + insert videos row vẫn còn chạy nền vài trăm ms)
       await new Promise(r => setTimeout(r, 1_500));
       await finalizeSessionToMinIO(app, sessionId);
     } catch (err) {

@@ -123,8 +123,8 @@ export function createRoom(
 }
 
 /**
- * Controller chỉ nên có MỘT phòng duy nhất để không mọc ra loạt phòng cũ lộn xộn
- * trên LAN. Khi tạo/dùng lại phòng, xóa hẳn (hard-delete) mọi phòng khác của user:
+ * Controller chỉ nên có MỘT phòng duy nhất để không mọc ra loạt phòng cũ lộn xộn.
+ * Khi tạo/dùng lại phòng, xóa hẳn (hard-delete) mọi phòng khác của user:
  * - các phòng OWNED đang mở khác (remote kẹt ở đó sẽ tự thoát membership),
  * - các phòng kín/đã đóng cũ không còn dùng (dọn sạch hàng rác tích lũy).
  */
@@ -200,22 +200,6 @@ function ensureOwnerMember(room: RoomRow, ownerUserId: string, ownerDeviceId: st
     camera_name: ownerDevice?.camera_name ?? `Controller-${ownerDeviceId.slice(-4)}`,
     joined_revision: revision,
     join_status: "approved",
-  });
-}
-
-/** Danh sách phòng đang "mở trên LAN" cho bất kỳ ai trong cùng subnet join (không cần mã). */
-export function discoverableRooms() {
-  return roomsRepo.listOpenRooms().map((room) => {
-    const active = roomMembersRepo.listAllByRoom(room.id).filter((m) => !m.left_at);
-    return {
-      room_id: room.id,
-      room_name: room.room_name,
-      invite_code: room.invite_code,
-      auto_approve: room.auto_approve,
-      member_count: active.filter((m) => m.join_status === "approved").length,
-      pending_count: active.filter((m) => m.join_status === "pending").length,
-      max_members: room.max_members,
-    };
   });
 }
 
@@ -299,12 +283,7 @@ export function joinRoom(
     throw new ApiError(CODE.NOT_EXISTED);
   }
 
-  let room = roomsRepo.findOpenByInviteCode(inviteCode);
-  // Chế độ LAN: app gửi mã mời từ discovery payload. Nếu để trống mã mà có phòng
-  // đang mở trên LAN (open_for_join=1) thì tự chọn phòng mở đó.
-  if (!room && !inviteCode) {
-    room = roomsRepo.listOpenRooms()[0];
-  }
+  const room = roomsRepo.findOpenByInviteCode(inviteCode);
   if (!room || (room.open_for_join !== 1 && new Date(room.invite_code_expires_at).getTime() < Date.now())) {
     throw new ApiError(CODE.NOT_EXISTED, "Mã mời không tồn tại hoặc đã hết hạn");
   }

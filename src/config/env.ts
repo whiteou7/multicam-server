@@ -1,5 +1,4 @@
 import "dotenv/config";
-import os from "node:os";
 
 function required(name: string, fallback?: string): string {
   const value = process.env[name] ?? fallback;
@@ -9,77 +8,55 @@ function required(name: string, fallback?: string): string {
   return value;
 }
 
+function num(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (Number.isNaN(value)) {
+    throw new Error(`Env var ${name} must be a number, got "${process.env[name]}"`);
+  }
+  return value;
+}
+
 export const env = {
-  port: Number(process.env.PORT ?? 3000),
+  port: num("PORT", 3000),
   host: process.env.HOST ?? "0.0.0.0",
+  // Comma-separated allowed origins; empty = reflect any origin (previous behavior).
+  corsOrigins: (process.env.CORS_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
 
   jwtSecret: required("JWT_SECRET", "dev-secret-change-me"),
-  accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS ?? 900), // 15 min
-  refreshTokenTtlSeconds: Number(process.env.REFRESH_TOKEN_TTL_SECONDS ?? 2_592_000), // 30 days
+  accessTokenTtlSeconds: num("ACCESS_TOKEN_TTL_SECONDS", 900), // 15 min
+  refreshTokenTtlSeconds: num("REFRESH_TOKEN_TTL_SECONDS", 2_592_000), // 30 days
 
   dbPath: process.env.DATABASE_PATH ?? "./data/multicam.sqlite3",
 
   minio: {
     endPoint: required("MINIO_ENDPOINT", "localhost"),
-    port: Number(process.env.MINIO_PORT ?? 9000),
+    port: num("MINIO_PORT", 9000),
     useSSL: (process.env.MINIO_USE_SSL ?? "false") === "true",
     accessKey: required("MINIO_ACCESS_KEY", "minioadmin"),
     secretKey: required("MINIO_SECRET_KEY", "minioadmin"),
     bucket: process.env.MINIO_BUCKET ?? "multicam-videos",
+    // Host clients use for presigned URLs (e.g. s3.example.com behind TLS).
+    // Unset = presign against the internal endpoint above (LAN/dev).
+    publicEndPoint: process.env.MINIO_PUBLIC_ENDPOINT || null,
+    publicPort: process.env.MINIO_PUBLIC_PORT ? num("MINIO_PUBLIC_PORT", 0) : undefined,
+    publicUseSSL: (process.env.MINIO_PUBLIC_USE_SSL ?? "false") === "true",
   },
 
   upload: {
-    maxFileSizeBytes: Number(process.env.MAX_FILE_SIZE_BYTES ?? 1_073_741_824), // 1 GB
-    chunkSizeBytes: Number(process.env.CHUNK_SIZE_BYTES ?? 5 * 1024 * 1024), // 5 MB
-    tmpDir: process.env.UPLOAD_TMP_DIR ?? "./data/upload-tmp",
-    sessionTtlMs: Number(process.env.UPLOAD_SESSION_TTL_MS ?? 6 * 60 * 60 * 1000), // 6h
-    downloadUrlTtlSeconds: Number(process.env.DOWNLOAD_URL_TTL_SECONDS ?? 600), // 10 min
+    maxFileSizeBytes: num("MAX_FILE_SIZE_BYTES", 1_073_741_824), // 1 GB
+    // Also the lifetime of the presigned PUT URL (S3 caps presign at 7 days).
+    sessionTtlMs: num("UPLOAD_SESSION_TTL_MS", 6 * 60 * 60 * 1000), // 6h
+    downloadUrlTtlSeconds: num("DOWNLOAD_URL_TTL_SECONDS", 600), // 10 min
   },
 
   mediasoup: {
-    numWorkers: Number(process.env.MEDIASOUP_NUM_WORKERS ?? 1),
-    rtcMinPort: Number(process.env.MEDIASOUP_RTC_MIN_PORT ?? 40000),
-    rtcMaxPort: Number(process.env.MEDIASOUP_RTC_MAX_PORT ?? 49999),
+    numWorkers: num("MEDIASOUP_NUM_WORKERS", 1),
+    rtcMinPort: num("MEDIASOUP_RTC_MIN_PORT", 40000),
+    rtcMaxPort: num("MEDIASOUP_RTC_MAX_PORT", 49999),
     // LAN/dev default: mediasoup listens on all interfaces and doesn't rewrite
     // its candidate IP. Set MEDIASOUP_ANNOUNCED_IP to the server's public IP
     // for any deployment where clients aren't on the same network.
     listenIp: process.env.MEDIASOUP_LISTEN_IP ?? "0.0.0.0",
     announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || null,
-  },
-
-  recording: {
-    // Bật ghi tự động khi phát sóng. Tắt bằng SERVER_RECORDING_ON=false.
-    on: (process.env.SERVER_RECORDING_ON ?? "true") === "true",
-    // Binary ffmpeg trên host. Windows: cài rồi để trong PATH (hoặc trỏ file ffmpeg.exe).
-    ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
-    // ffprobe (thường đi kèm ffmpeg) — dùng để lấy duration THẬT của file đã ghi.
-    ffprobePath: process.env.FFPROBE_PATH || "ffprobe",
-    tmpDir: process.env.RECORDINGS_TMP_DIR ?? "./data/recordings-tmp",
-    // Ngưỡng tối thiểu để coi file là có media. File chỉ có header (ftyp ~32B,
-    // hoặc ftyp+empty moov ~1KB) vẫn khác 0 nên trước đây bị upload thành "video".
-    // Dưới ngưỡng này = ffmpeg không decode được frame nào → KHÔNG upload/insert.
-    minBytes: Number(process.env.RECORDING_MIN_BYTES ?? 10_000),
-    // Bật thì đẩy file MP4 lên MinIO + insert videos. Tắt (false) để debug:
-    // giữ nguyên file ở tmpDir, không upload — log đầy đủ thông tin file + stderr ffmpeg.
-    upload: (process.env.SERVER_RECORDING_UPLOAD ?? "true") === "true",
-  },
-
-  discovery: {
-    // Quảng bá server qua mDNS (_multicam._tcp) + UDP responder để app trên LAN tự tìm.
-    enabled: (process.env.DISCOVERY_ENABLED ?? "true") === "true",
-    serverName: process.env.SERVER_NAME ?? os.hostname(),
-    udpPort: Number(process.env.DISCOVER_UDP_PORT ?? 55666),
-  },
-
-  rooms: {
-    // "Phòng chung" tự tạo khi server khởi động (không giới hạn thời gian, mở trên LAN).
-    // Phone quét mạng → thấy phòng này trong /rooms/discover → chọn và join không cần mã.
-    defaultRoomEnabled: (process.env.DEFAULT_ROOM_ENABLED ?? "true") === "true",
-    defaultRoomName: process.env.DEFAULT_ROOM_NAME ?? "Phòng chung (LAN)",
-    defaultRoomMaxMembers: Number(process.env.DEFAULT_ROOM_MAX_MEMBERS ?? 50),
-    defaultRoomAutoApprove: (process.env.DEFAULT_ROOM_AUTO_APPROVE ?? "true") === "true",
-    // Owner hệ thống nắm giữ phòng chung (seed tự tạo nếu chưa tồn tại).
-    defaultOwnerEmail: process.env.DEFAULT_ROOM_OWNER_EMAIL ?? "default-room@multicam.local",
-    defaultOwnerPassword: process.env.DEFAULT_ROOM_OWNER_PASSWORD ?? "DefaultRoom@123",
   },
 };

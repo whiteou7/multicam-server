@@ -59,3 +59,16 @@ for (const migration of LATE_COLUMN_MIGRATIONS) {
     db.exec(migration.ddl);
   }
 }
+
+// Uploads moved from server-side chunks to a presigned PUT straight to MinIO:
+// old DBs get object_key and lose the chunk-era columns/table.
+const uploadCols = new Set(
+  (db.prepare("PRAGMA table_info(uploads)").all() as { name: string }[]).map((c) => c.name)
+);
+if (!uploadCols.has("object_key")) {
+  db.exec("ALTER TABLE uploads ADD COLUMN object_key TEXT NOT NULL DEFAULT ''");
+}
+for (const col of ["chunk_size", "total_chunks", "tmp_dir"]) {
+  if (uploadCols.has(col)) db.exec(`ALTER TABLE uploads DROP COLUMN ${col}`);
+}
+db.exec("DROP TABLE IF EXISTS upload_chunks");
