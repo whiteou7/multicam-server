@@ -66,6 +66,9 @@ npm run build:web                                 # typechecks web/ and builds i
 
 The dashboard source is in `web/` (Vue 3 + Vite). `public/` is generated output and is not committed; the API serves it at `/` once built (the Docker image builds it).
 
+Running on a Mac for phones on the same Wi-Fi (no VPS/domain), step by step in Vietnamese:
+[docs/local-lan-setup.md](docs/local-lan-setup.md).
+
 ## Known gaps
 
 - Default JWT secret, MinIO credentials and the seeded accounts (plain passwords, recreated on every start) are insecure. Override via `.env`; do not hold real user data until fixed.
