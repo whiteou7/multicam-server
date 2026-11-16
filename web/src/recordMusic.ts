@@ -50,6 +50,15 @@ export function playMusic(): void {
   a.play().catch((e) => log(`không phát được nhạc: ${e instanceof Error ? e.message : e}`));
 }
 
+/**
+ * Đưa nhạc về đầu bài (cho người thử tiếp theo). Đang phát thì phát lại từ đầu,
+ * đang dừng thì lần "Ghi tất cả" sau sẽ bắt đầu từ đầu.
+ */
+export function resetMusic(): void {
+  if (audio) audio.currentTime = 0;
+  log("nhạc: về đầu bài");
+}
+
 /** Dừng đúng tại thời điểm hiện tại, giữ vị trí cho lần ghi sau. */
 export function pauseMusic(): void {
   wantPlaying = false;

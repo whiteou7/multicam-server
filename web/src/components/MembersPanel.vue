@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { PreviewSnapshot } from "../preview";
 import { HEALTH_LABEL } from "../labels";
+import { resetMusic } from "../recordMusic";
 import { tileHealth } from "../preview";
 import type { Member, Room } from "../useRoom";
 
@@ -60,6 +61,7 @@ function upload(m: Member): string {
     <div class="row">
       <button class="danger" :disabled="!room.roomId" @click="room.startRecording">Ghi tất cả</button>
       <button :disabled="!room.roomId" @click="room.stopRecording">Dừng tất cả</button>
+      <button title="Lần ghi tiếp theo phát nhạc từ đầu bài" @click="resetMusic">⏮ Nhạc về đầu</button>
     </div>
     <p v-if="room.recNotice" class="muted">{{ room.recNotice }}</p>
   </section>
